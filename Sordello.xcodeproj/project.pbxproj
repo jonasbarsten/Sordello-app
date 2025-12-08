@@ -6,6 +6,11 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		B1884E512EE77BB10080FBE5 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = B1884E502EE77BB10080FBE5 /* GRDB */; };
+		B1884E542EE77F690080FBE5 /* GRDBQuery in Frameworks */ = {isa = PBXBuildFile; productRef = B1884E532EE77F690080FBE5 /* GRDBQuery */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		B11E6D092EE62FC1006BBA6D /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -52,6 +57,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B1884E542EE77F690080FBE5 /* GRDBQuery in Frameworks */,
+				B1884E512EE77BB10080FBE5 /* GRDB in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -112,6 +119,8 @@
 			);
 			name = Sordello;
 			packageProductDependencies = (
+				B1884E502EE77BB10080FBE5 /* GRDB */,
+				B1884E532EE77F690080FBE5 /* GRDBQuery */,
 			);
 			productName = Sordello;
 			productReference = B11E6CF92EE62FBF006BBA6D /* Sordello.app */;
@@ -195,6 +204,10 @@
 			);
 			mainGroup = B11E6CF02EE62FBF006BBA6D;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				B1884E4F2EE77BB10080FBE5 /* XCRemoteSwiftPackageReference "GRDB.swift" */,
+				B1884E522EE77F690080FBE5 /* XCRemoteSwiftPackageReference "GRDBQuery" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = B11E6CFA2EE62FBF006BBA6D /* Products */;
 			projectDirPath = "";
@@ -637,6 +650,38 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		B1884E4F2EE77BB10080FBE5 /* XCRemoteSwiftPackageReference "GRDB.swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/groue/GRDB.swift.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 7.8.0;
+			};
+		};
+		B1884E522EE77F690080FBE5 /* XCRemoteSwiftPackageReference "GRDBQuery" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/groue/GRDBQuery";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.11.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		B1884E502EE77BB10080FBE5 /* GRDB */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = B1884E4F2EE77BB10080FBE5 /* XCRemoteSwiftPackageReference "GRDB.swift" */;
+			productName = GRDB;
+		};
+		B1884E532EE77F690080FBE5 /* GRDBQuery */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = B1884E522EE77F690080FBE5 /* XCRemoteSwiftPackageReference "GRDBQuery" */;
+			productName = GRDBQuery;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = B11E6CF12EE62FBF006BBA6D /* Project object */;
 }

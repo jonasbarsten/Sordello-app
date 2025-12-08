@@ -6,22 +6,20 @@
 //
 
 import SwiftUI
-import SwiftData
 import AppKit
 import UniformTypeIdentifiers
+import GRDB
 
 struct ContentView: View {
-    @Environment(\.modelContext) private var modelContext
-    @Query private var projects: [SDProject]
-    var oscServer = OSCServer.shared
+    @State private var projectManager = ProjectManager.shared
 
     var body: some View {
         NavigationSplitView {
             ProjectListView()
         } content: {
             if let selectedPath = UIState.shared.selectedProjectPath,
-               let project = projects.first(where: { $0.path == selectedPath }) {
-                LiveSetListView(projectPath: project.path)
+               projectManager.openProjectPaths.contains(selectedPath) {
+                LiveSetListView(projectPath: selectedPath)
             } else {
                 Text("Select a project")
                     .foregroundColor(.secondary)
@@ -48,67 +46,38 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 900, minHeight: 500)
-        .onAppear {
-            // Inject model context to ProjectManager
-            ProjectManager.shared.modelContext = modelContext
-        }
     }
 }
 
 // MARK: - Project List (Sidebar)
 
 struct ProjectListView: View {
-    @Environment(\.modelContext) private var modelContext
-    @Query(sort: \SDProject.lastUpdated, order: .reverse) private var projects: [SDProject]
-    var oscServer = OSCServer.shared
+    @State private var projectManager = ProjectManager.shared
 
     var body: some View {
         List(selection: Binding(
             get: { UIState.shared.selectedProjectPath },
             set: { UIState.shared.selectedProjectPath = $0 }
         )) {
-            if projects.isEmpty {
+            if projectManager.openProjectPaths.isEmpty {
                 Text("No projects opened")
                     .foregroundColor(.secondary)
                     .padding()
             } else {
-                ForEach(projects, id: \.path) { project in
+                ForEach(projectManager.getOpenProjects(), id: \.path) { project in
                     ProjectRow(project: project)
                         .tag(project.path)
                 }
             }
         }
         .navigationSplitViewColumnWidth(min: 200, ideal: 250)
-        .toolbar {
-            ToolbarItem(placement: .status) {
-                HStack {
-                    Circle()
-                        .fill(oscServer.isRunning ? .green : .red)
-                        .frame(width: 8, height: 8)
-                    Text(oscServer.isRunning ? "Listening" : "Offline")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-            }
-        }
     }
 }
 
 struct ProjectRow: View {
-    @Environment(\.modelContext) private var modelContext
-    var project: SDProject
-
-    private var mainCount: Int {
-        let predicate = SDPredicates.mainLiveSets(forProjectPath: project.path)
-        let descriptor = FetchDescriptor<SDLiveSet>(predicate: predicate)
-        return (try? modelContext.fetchCount(descriptor)) ?? 0
-    }
-
-    private var subprojectCount: Int {
-        let predicate = SDPredicates.subprojectLiveSets(forProjectPath: project.path)
-        let descriptor = FetchDescriptor<SDLiveSet>(predicate: predicate)
-        return (try? modelContext.fetchCount(descriptor)) ?? 0
-    }
+    var project: Project
+    @State private var mainCount: Int = 0
+    @State private var subprojectCount: Int = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -123,1065 +92,514 @@ struct ProjectRow: View {
                 .foregroundColor(.secondary)
         }
         .padding(.vertical, 4)
+        .onAppear {
+            fetchCounts()
+        }
+    }
+
+    private func fetchCounts() {
+        guard let projectDb = ProjectManager.shared.database(forProjectPath: project.path) else { return }
+        do {
+            let mainSets = try projectDb.fetchMainLiveSets()
+            let subprojects = try projectDb.fetchSubprojectLiveSets()
+            mainCount = mainSets.count
+            subprojectCount = subprojects.count
+        } catch {
+            mainCount = 0
+            subprojectCount = 0
+        }
     }
 }
 
-// MARK: - LiveSet List (Middle Column)
+// MARK: - LiveSet List (Content)
 
 struct LiveSetListView: View {
     let projectPath: String
+    @State private var mainLiveSets: [LiveSet] = []
+    @State private var versions: [String: [LiveSet]] = [:]
+    @State private var mainObservationTask: Task<Void, Never>?
 
     var body: some View {
         List(selection: Binding(
             get: { UIState.shared.selectedLiveSetPath },
             set: { UIState.shared.selectedLiveSetPath = $0 }
         )) {
-            // Main Live Sets with dynamic sort
-            MainLiveSetsSection(projectPath: projectPath, sortAscending: UIState.shared.liveSetSortOrder == .ascending)
+            Section("Live Sets") {
+                ForEach(mainLiveSets, id: \.path) { liveSet in
+                    LiveSetRow(liveSet: liveSet, versions: versions[liveSet.path] ?? [])
+                        .tag(liveSet.path)
+                }
+            }
 
-            // Subprojects
-            SubprojectLiveSetsSection(projectPath: projectPath)
-
-            // Backups
-            BackupLiveSetsSection(projectPath: projectPath)
+            SubprojectsSection(projectPath: projectPath)
+            BackupsSection(projectPath: projectPath)
         }
-        .navigationSplitViewColumnWidth(min: 200, ideal: 280)
-    }
-}
-
-/// Subview for main LiveSets with dynamic sort order via init
-struct MainLiveSetsSection: View {
-    @Query private var liveSets: [SDLiveSet]
-    @Query private var allVersions: [SDLiveSet]
-    let projectPath: String
-    @State private var expandedPaths: Set<String> = []
-
-    init(projectPath: String, sortAscending: Bool) {
-        self.projectPath = projectPath
-        let mainCategory = SDLiveSetCategory.main.rawValue
-        let predicate = #Predicate<SDLiveSet> { liveSet in
-            liveSet.project?.path == projectPath && liveSet.categoryRaw == mainCategory
+        .navigationSplitViewColumnWidth(min: 250, ideal: 300)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    Button("Sort A-Z") {
+                        UIState.shared.liveSetSortOrder = .ascending
+                    }
+                    Button("Sort Z-A") {
+                        UIState.shared.liveSetSortOrder = .descending
+                    }
+                } label: {
+                    Image(systemName: "arrow.up.arrow.down")
+                }
+            }
         }
-        _liveSets = Query(
-            filter: predicate,
-            sort: [SortDescriptor(\SDLiveSet.path, order: sortAscending ? .forward : .reverse)]
-        )
-
-        // Also fetch all versions for this project
-        let versionCategory = SDLiveSetCategory.version.rawValue
-        let versionPredicate = #Predicate<SDLiveSet> { liveSet in
-            liveSet.project?.path == projectPath && liveSet.categoryRaw == versionCategory
+        .onAppear {
+            startObserving()
         }
-        _allVersions = Query(filter: versionPredicate, sort: [SortDescriptor(\SDLiveSet.path, order: .reverse)])
+        .onDisappear {
+            mainObservationTask?.cancel()
+        }
+        .onChange(of: projectPath) { _, _ in
+            startObserving()
+        }
     }
 
-    private func versionsFor(_ liveSet: SDLiveSet) -> [SDLiveSet] {
-        allVersions.filter { $0.parentLiveSetPath == liveSet.path }
-    }
+    private func startObserving() {
+        guard let projectDb = ProjectManager.shared.database(forProjectPath: projectPath),
+              let db = projectDb.dbQueue else { return }
 
-    private func latestVersionPath(for liveSet: SDLiveSet) -> String {
-        // Versions are sorted by path descending, so first is latest
-        versionsFor(liveSet).first?.path ?? liveSet.path
-    }
-
-    var body: some View {
-        if !liveSets.isEmpty {
-            Section {
-                ForEach(liveSets, id: \.path) { liveSet in
-                    let versions = versionsFor(liveSet)
-                    let hasVersions = !versions.isEmpty
-                    let isExpanded = expandedPaths.contains(liveSet.path)
-
-                    // Main liveset row
-                    LiveSetMainRow(
-                        liveSet: liveSet,
-                        versionCount: versions.count,
-                        isExpanded: isExpanded,
-                        onToggleExpand: hasVersions ? { toggleExpanded(liveSet.path) } : nil,
-                        latestVersionPath: versions.first?.path
-                    )
-                    .tag(liveSet.path)
-
-                    // Expanded versions (if any)
-                    if isExpanded && hasVersions {
-                        ForEach(versions, id: \.path) { version in
-                            VersionRow(version: version)
-                                .tag(version.path)
+        mainObservationTask?.cancel()
+        mainObservationTask = Task {
+            let observation = projectDb.observeMainLiveSets()
+            do {
+                for try await fetched in observation.values(in: db) {
+                    mainLiveSets = fetched.sorted { lhs, rhs in
+                        if UIState.shared.liveSetSortOrder == .ascending {
+                            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+                        } else {
+                            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedDescending
                         }
-
-                        // Original at the bottom
-                        OriginalLiveSetRow(liveSet: liveSet)
-                            .tag("original-\(liveSet.path)")
                     }
+                    // Load versions for each main LiveSet
+                    await loadVersions(for: fetched, db: projectDb)
                 }
-            } header: {
-                HStack {
-                    Text("Live Sets")
-                    Spacer()
-                    Button {
-                        UIState.shared.liveSetSortOrder = UIState.shared.liveSetSortOrder == .ascending ? .descending : .ascending
-                    } label: {
-                        Image(systemName: UIState.shared.liveSetSortOrder == .ascending ? "arrow.up" : "arrow.down")
-                            .font(.caption)
-                    }
-                    .buttonStyle(.plain)
-                    .help(UIState.shared.liveSetSortOrder == .ascending ? "Sort Z-A" : "Sort A-Z")
-                }
+            } catch {
+                // Observation cancelled
             }
         }
     }
 
-    private func toggleExpanded(_ path: String) {
-        if expandedPaths.contains(path) {
-            expandedPaths.remove(path)
-        } else {
-            expandedPaths.insert(path)
+    private func loadVersions(for liveSets: [LiveSet], db: ProjectDatabase) async {
+        var newVersions: [String: [LiveSet]] = [:]
+        for liveSet in liveSets {
+            do {
+                let versionList = try db.fetchVersionLiveSets(forParentPath: liveSet.path)
+                newVersions[liveSet.path] = versionList
+            } catch {
+                newVersions[liveSet.path] = []
+            }
         }
+        versions = newVersions
     }
 }
 
-/// Subview for subproject LiveSets
-struct SubprojectLiveSetsSection: View {
-    @Query private var liveSets: [SDLiveSet]
-
-    init(projectPath: String) {
-        let subprojectCategory = SDLiveSetCategory.subproject.rawValue
-        let predicate = #Predicate<SDLiveSet> { liveSet in
-            liveSet.project?.path == projectPath && liveSet.categoryRaw == subprojectCategory
-        }
-        _liveSets = Query(filter: predicate, sort: [SortDescriptor(\SDLiveSet.path)])
-    }
-
-    var body: some View {
-        if !liveSets.isEmpty {
-            Section("Subprojects") {
-                ForEach(liveSets, id: \.path) { liveSet in
-                    LiveSetRow(liveSet: liveSet)
-                        .tag(liveSet.path)
-                }
-            }
-        }
-    }
-}
-
-/// Subview for backup LiveSets sorted by timestamp
-struct BackupLiveSetsSection: View {
-    @Environment(\.modelContext) private var modelContext
-    @Query private var liveSets: [SDLiveSet]
-
-    init(projectPath: String) {
-        let backupCategory = SDLiveSetCategory.backup.rawValue
-        let predicate = #Predicate<SDLiveSet> { liveSet in
-            liveSet.project?.path == projectPath && liveSet.categoryRaw == backupCategory
-        }
-        _liveSets = Query(
-            filter: predicate,
-            sort: [SortDescriptor(\SDLiveSet.backupTimestamp, order: .reverse)]
-        )
-    }
-
-    var body: some View {
-        if !liveSets.isEmpty {
-            Section("Backups (\(liveSets.count))") {
-                ForEach(liveSets, id: \.path) { liveSet in
-                    LiveSetRow(liveSet: liveSet)
-                        .tag(liveSet.path)
-                }
-            }
-        }
-    }
-}
-
-/// Main liveset row (simplified, without version expansion logic embedded)
-struct LiveSetMainRow: View {
-    let liveSet: SDLiveSet
-    let versionCount: Int
-    let isExpanded: Bool
-    var onToggleExpand: (() -> Void)?
-    var latestVersionPath: String?
-
-    @State private var showVersionDialog = false
-    @State private var versionComment = ""
-
-    private var isSelected: Bool {
-        UIState.shared.selectedLiveSetPath == liveSet.path
-    }
-
-    var body: some View {
-        HStack {
-            // Expand/collapse chevron (only if has versions)
-            if versionCount > 0 {
-                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                    .foregroundColor(.secondary)
-                    .frame(width: 12)
-                    .onTapGesture {
-                        onToggleExpand?()
-                    }
-            } else {
-                Rectangle()
-                    .fill(Color.clear)
-                    .frame(width: 12)
-            }
-
-            Image(systemName: "doc.fill")
-                .foregroundColor(.blue)
-
-            Text(liveSet.name)
-                .lineLimit(1)
-
-            if versionCount > 0 {
-                Text("(\(versionCount))")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-
-            Spacer()
-
-            // Show spinner while parsing
-            if !liveSet.isParsed {
-                ProgressView()
-                    .controlSize(.small)
-            }
-        }
-        .contentShape(Rectangle())
-        .onTapGesture {
-            if isSelected && versionCount > 0 {
-                // Second click on selected liveset with versions toggles expand/collapse
-                onToggleExpand?()
-            } else {
-                UIState.shared.selectedLiveSetPath = liveSet.path
-            }
-        }
-        .contextMenu {
-            if versionCount > 0, let latestPath = latestVersionPath {
-                Button("Open Latest Version in Ableton Live") {
-                    NSWorkspace.shared.open(URL(fileURLWithPath: latestPath))
-                }
-                Button("Open Original in Ableton Live") {
-                    NSWorkspace.shared.open(URL(fileURLWithPath: liveSet.path))
-                }
-            } else {
-                Button("Open in Ableton Live") {
-                    NSWorkspace.shared.open(URL(fileURLWithPath: liveSet.path))
-                }
-            }
-
-            Divider()
-
-            Button("Create Version...") {
-                versionComment = ""
-                showVersionDialog = true
-            }
-        }
-        .alert("Create Version", isPresented: $showVersionDialog) {
-            TextField("Comment (optional)", text: $versionComment)
-            Button("Create") {
-                ProjectManager.shared.createVersion(of: liveSet, comment: versionComment.isEmpty ? nil : versionComment)
-            }
-            Button("Cancel", role: .cancel) { }
-        } message: {
-            Text("Add an optional comment to describe this version.")
-        }
-    }
-}
-
-/// Row showing the "Original" liveset at the bottom of versions list
-struct OriginalLiveSetRow: View {
-    let liveSet: SDLiveSet
-
-    var body: some View {
-        HStack {
-            Rectangle()
-                .fill(Color.clear)
-                .frame(width: 24)
-            Image(systemName: "doc")
-                .foregroundColor(.blue.opacity(0.6))
-            Text("Original")
-                .font(.caption)
-                .foregroundColor(.secondary)
-
-            Spacer()
-
-            // Show spinner while parsing
-            if !liveSet.isParsed {
-                ProgressView()
-                    .controlSize(.mini)
-            }
-        }
-        .contentShape(Rectangle())
-        .contextMenu {
-            Button("Open in Ableton Live") {
-                NSWorkspace.shared.open(URL(fileURLWithPath: liveSet.path))
-            }
-        }
-    }
-}
-
-// MARK: - Row Views
-
-/// Generic row for subprojects and backups (not main livesets)
 struct LiveSetRow: View {
-    let liveSet: SDLiveSet
+    let liveSet: LiveSet
+    let versions: [LiveSet]
+    @State private var trackCount: Int = 0
+    @State private var observationTask: Task<Void, Never>?
 
     var body: some View {
-        HStack {
-            Image(systemName: iconForCategory(liveSet.category))
-                .foregroundColor(colorForCategory(liveSet.category))
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(liveSet.name)
-                    .lineLimit(1)
-
-                // Show source info for subprojects with metadata
-                if liveSet.category == .subproject, liveSet.hasMetadata {
-                    Text("From: \(liveSet.sourceLiveSetName ?? "") → \(liveSet.sourceGroupName ?? "")")
-                        .font(.caption2)
+        DisclosureGroup {
+            ForEach(versions, id: \.path) { version in
+                HStack {
+                    Image(systemName: "clock.arrow.circlepath")
+                        .foregroundColor(.orange)
+                    Text(version.name)
+                    Spacer()
+                }
+                .padding(.leading, 16)
+                .tag(version.path)
+            }
+        } label: {
+            HStack {
+                Image(systemName: "doc.fill")
+                    .foregroundColor(.blue)
+                VStack(alignment: .leading) {
+                    Text(liveSet.name)
+                    Text("\(trackCount) tracks • Live \(liveSet.liveVersion)")
+                        .font(.caption)
                         .foregroundColor(.secondary)
-                        .lineLimit(1)
                 }
             }
-
-            Spacer()
-
-            // Show spinner while parsing
-            if !liveSet.isParsed {
-                ProgressView()
-                    .controlSize(.small)
-            }
         }
-        .contentShape(Rectangle())
-        .contextMenu {
-            Button("Open in Ableton Live") {
-                NSWorkspace.shared.open(URL(fileURLWithPath: liveSet.path))
-            }
+        .onAppear {
+            startObserving()
+        }
+        .onDisappear {
+            observationTask?.cancel()
         }
     }
 
-    private func iconForCategory(_ category: SDLiveSetCategory) -> String {
-        switch category {
-        case .main: return "doc.fill"
-        case .subproject: return "doc.badge.gearshape.fill"
-        case .version: return "clock.arrow.circlepath"
-        case .backup: return "clock.fill"
-        }
-    }
+    private func startObserving() {
+        guard let projectPath = liveSet.projectPath,
+              let projectDb = ProjectManager.shared.database(forProjectPath: projectPath),
+              let db = projectDb.dbQueue else { return }
 
-    private func colorForCategory(_ category: SDLiveSetCategory) -> Color {
-        switch category {
-        case .main: return .blue
-        case .subproject: return .purple
-        case .version: return .orange
-        case .backup: return .gray
+        observationTask?.cancel()
+        observationTask = Task {
+            let observation = projectDb.observeTracks(forLiveSetPath: liveSet.path)
+            do {
+                for try await tracks in observation.values(in: db) {
+                    trackCount = tracks.count
+                }
+            } catch {
+                // Observation cancelled
+            }
         }
     }
 }
 
-struct VersionRow: View {
-    let version: SDLiveSet
+struct SubprojectsSection: View {
+    let projectPath: String
+    @State private var subprojects: [LiveSet] = []
+    @State private var observationTask: Task<Void, Never>?
 
     var body: some View {
-        HStack(alignment: .top) {
-            Rectangle()
-                .fill(Color.clear)
-                .frame(width: 24)
-            Image(systemName: "clock.arrow.circlepath")
-                .foregroundColor(.orange)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(formatVersionName(version.name))
-                    .font(.caption)
-                    .lineLimit(1)
-                if let comment = version.comment, !comment.isEmpty {
-                    Text(comment)
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                        .lineLimit(2)
+        if !subprojects.isEmpty {
+            Section("Subprojects") {
+                ForEach(subprojects, id: \.path) { subproject in
+                    HStack {
+                        Image(systemName: "doc.badge.gearshape.fill")
+                            .foregroundColor(.purple)
+                        VStack(alignment: .leading) {
+                            Text(subproject.name)
+                            if let groupName = subproject.sourceGroupName {
+                                Text("From: \(groupName)")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                    .tag(subproject.path)
                 }
-            }
-
-            Spacer()
-
-            // Show spinner while parsing
-            if !version.isParsed {
-                ProgressView()
-                    .controlSize(.mini)
-            }
-        }
-        .contextMenu {
-            Button("Open in Ableton Live") {
-                let url = URL(fileURLWithPath: version.path)
-                NSWorkspace.shared.open(url)
             }
         }
     }
 
-    private func formatVersionName(_ name: String) -> String {
-        if let range = name.range(of: #"\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}"#, options: .regularExpression) {
-            var timestamp = String(name[range])
-            timestamp = timestamp.replacingOccurrences(of: "T", with: " ")
-            let parts = timestamp.split(separator: " ")
-            if parts.count == 2 {
-                let date = parts[0]
-                let time = parts[1].replacingOccurrences(of: "-", with: ":")
-                let timeParts = time.split(separator: ":")
-                if timeParts.count >= 2 {
-                    return "\(date) \(timeParts[0]):\(timeParts[1])"
+    init(projectPath: String) {
+        self.projectPath = projectPath
+        _observationTask = State(initialValue: nil)
+        _subprojects = State(initialValue: [])
+    }
+
+    var bodyWithTask: some View {
+        body
+            .onAppear {
+                startObserving()
+            }
+            .onDisappear {
+                observationTask?.cancel()
+            }
+    }
+
+    private func startObserving() {
+        guard let projectDb = ProjectManager.shared.database(forProjectPath: projectPath),
+              let db = projectDb.dbQueue else { return }
+
+        observationTask?.cancel()
+        observationTask = Task {
+            let observation = ValueObservation.tracking { db in
+                try LiveSet
+                    .filter(Column("projectPath") == projectPath)
+                    .filter(Column("category") == LiveSetCategory.subproject.rawValue)
+                    .order(Column("path"))
+                    .fetchAll(db)
+            }
+            do {
+                for try await fetched in observation.values(in: db) {
+                    subprojects = fetched
                 }
+            } catch {
+                // Observation cancelled
             }
         }
-        return name
     }
 }
 
-// MARK: - LiveSet Detail View
+struct BackupsSection: View {
+    let projectPath: String
+    @State private var backups: [LiveSet] = []
+    @State private var observationTask: Task<Void, Never>?
 
-/// Wrapper to fetch LiveSet by path
+    var body: some View {
+        if !backups.isEmpty {
+            Section("Backups") {
+                ForEach(backups, id: \.path) { backup in
+                    HStack {
+                        Image(systemName: "clock.fill")
+                            .foregroundColor(.gray)
+                        VStack(alignment: .leading) {
+                            Text(backup.name)
+                            if let timestamp = backup.backupTimestamp {
+                                Text(timestamp.formatted(date: .abbreviated, time: .shortened))
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                    .tag(backup.path)
+                }
+            }
+        }
+    }
+
+    init(projectPath: String) {
+        self.projectPath = projectPath
+        _observationTask = State(initialValue: nil)
+        _backups = State(initialValue: [])
+    }
+
+    var bodyWithTask: some View {
+        body
+            .onAppear {
+                startObserving()
+            }
+            .onDisappear {
+                observationTask?.cancel()
+            }
+    }
+
+    private func startObserving() {
+        guard let projectDb = ProjectManager.shared.database(forProjectPath: projectPath),
+              let db = projectDb.dbQueue else { return }
+
+        observationTask?.cancel()
+        observationTask = Task {
+            let observation = ValueObservation.tracking { db in
+                try LiveSet
+                    .filter(Column("projectPath") == projectPath)
+                    .filter(Column("category") == LiveSetCategory.backup.rawValue)
+                    .order(Column("backupTimestamp").desc)
+                    .fetchAll(db)
+            }
+            do {
+                for try await fetched in observation.values(in: db) {
+                    backups = fetched
+                }
+            } catch {
+                // Observation cancelled
+            }
+        }
+    }
+}
+
+// MARK: - LiveSet Detail (Detail)
+
 struct LiveSetDetailWrapper: View {
-    @Query private var liveSets: [SDLiveSet]
-
-    init(liveSetPath: String) {
-        // Handle "original-" prefix from OriginalLiveSetRow tag
-        let actualPath = liveSetPath.hasPrefix("original-")
-            ? String(liveSetPath.dropFirst("original-".count))
-            : liveSetPath
-
-        let predicate = #Predicate<SDLiveSet> { $0.path == actualPath }
-        _liveSets = Query(filter: predicate)
-    }
+    let liveSetPath: String
+    @State private var liveSet: LiveSet?
+    @State private var observationTask: Task<Void, Never>?
 
     var body: some View {
-        if let liveSet = liveSets.first {
-            LiveSetDetailView(liveSet: liveSet)
-        } else {
-            Text("LiveSet not found")
-                .foregroundColor(.secondary)
+        Group {
+            if let liveSet = liveSet {
+                LiveSetDetailView(liveSet: liveSet)
+            } else {
+                ProgressView("Loading...")
+            }
+        }
+        .onAppear {
+            startObserving()
+        }
+        .onDisappear {
+            observationTask?.cancel()
+        }
+        .onChange(of: liveSetPath) { _, _ in
+            startObserving()
+        }
+    }
+
+    private func startObserving() {
+        // Get project path from the liveSet path (parent directory)
+        let projectPath = URL(fileURLWithPath: liveSetPath).deletingLastPathComponent().path
+
+        guard let projectDb = ProjectManager.shared.database(forProjectPath: projectPath),
+              let db = projectDb.dbQueue else { return }
+
+        observationTask?.cancel()
+        observationTask = Task {
+            let observation = ValueObservation.tracking { db in
+                try LiveSet.fetchOne(db, key: liveSetPath)
+            }
+            do {
+                for try await fetched in observation.values(in: db) {
+                    liveSet = fetched
+                }
+            } catch {
+                // Observation cancelled
+            }
         }
     }
 }
 
 struct LiveSetDetailView: View {
-    let liveSet: SDLiveSet
-
-    private var isInspectorPresented: Binding<Bool> {
-        Binding(
-            get: { UIState.shared.isInspectorVisible },
-            set: { UIState.shared.isInspectorVisible = $0 }
-        )
-    }
+    let liveSet: LiveSet
+    @State private var rootTracks: [Track] = []
+    @State private var observationTask: Task<Void, Never>?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            // Header
-            LiveSetHeader(liveSet: liveSet)
-
-            Divider()
-
-            // Content
-            if liveSet.tracks.isEmpty {
-                VStack {
-                    Spacer()
-                    ProgressView()
-                        .padding()
-                    Text("Loading track structure...")
-                        .foregroundColor(.secondary)
-                    Spacer()
+        HSplitView {
+            // Track list
+            List(selection: Binding(
+                get: { UIState.shared.selectedTrackId },
+                set: { UIState.shared.selectedTrackId = $0 }
+            )) {
+                ForEach(rootTracks, id: \.trackId) { track in
+                    TrackRow(track: track, liveSetPath: liveSet.path)
+                        .tag(track.trackId)
                 }
-                .frame(maxWidth: .infinity)
-            } else {
-                TrackListView(liveSetPath: liveSet.path)
             }
-        }
-        .inspector(isPresented: isInspectorPresented) {
-            InspectorContent(liveSet: liveSet)
-                .inspectorColumnWidth(min: 250, ideal: 300, max: 400)
+            .frame(minWidth: 300)
+
+            // Inspector
+            if UIState.shared.isInspectorVisible {
+                InspectorContent(liveSet: liveSet)
+                    .frame(minWidth: 250, maxWidth: 300)
+            }
         }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {
-                    ProjectManager.shared.openProject()
-                } label: {
-                    Image(systemName: "plus")
-                }
-                .help("Open Project...")
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
                     UIState.shared.isInspectorVisible.toggle()
                 } label: {
-                    Image(systemName: UIState.shared.isInspectorVisible ? "info.circle.fill" : "info.circle")
+                    Image(systemName: UIState.shared.isInspectorVisible ? "sidebar.trailing" : "sidebar.trailing")
                 }
-                .help(UIState.shared.isInspectorVisible ? "Hide Inspector" : "Show Inspector")
             }
+        }
+        .onAppear {
+            startObserving()
+        }
+        .onDisappear {
+            observationTask?.cancel()
         }
         .onChange(of: liveSet.path) { _, _ in
             UIState.shared.selectedTrackId = nil
+            startObserving()
+        }
+    }
+
+    private func startObserving() {
+        guard let projectPath = liveSet.projectPath,
+              let projectDb = ProjectManager.shared.database(forProjectPath: projectPath),
+              let db = projectDb.dbQueue else { return }
+
+        observationTask?.cancel()
+        observationTask = Task {
+            let observation = projectDb.observeRootTracks(forLiveSetPath: liveSet.path)
+            do {
+                for try await tracks in observation.values(in: db) {
+                    rootTracks = tracks
+                }
+            } catch {
+                // Observation cancelled
+            }
         }
     }
 }
 
-struct LiveSetHeader: View {
-    @Environment(\.modelContext) private var modelContext
-    let liveSet: SDLiveSet
+// MARK: - Track Row
 
-    // Query to observe modified tracks (triggers re-render when isModified changes)
-    @Query private var modifiedTracks: [SDTrack]
-
-    // Save functionality state
-    @State private var showSaveConfirmation = false
-    @State private var savedPath: String?
-    @State private var showOpenPrompt = false
-    @State private var saveError: String?
-    @State private var showSaveError = false
-    @State private var isSaving = false
-
-    init(liveSet: SDLiveSet) {
-        self.liveSet = liveSet
-        // Query for tracks that are modified in this LiveSet
-        let liveSetPath = liveSet.path
-        let predicate = #Predicate<SDTrack> { track in
-            track.liveSet?.path == liveSetPath && track.isModified == true
-        }
-        _modifiedTracks = Query(filter: predicate)
-    }
-
-    private var hasUnsavedChanges: Bool {
-        !modifiedTracks.isEmpty
-    }
-
-    private var groupCount: Int {
-        let groupType = SDTrackType.group.rawValue
-        let liveSetPath = liveSet.path
-        let predicate = #Predicate<SDTrack> { track in
-            track.liveSet?.path == liveSetPath && track.typeRaw == groupType
-        }
-        let descriptor = FetchDescriptor<SDTrack>(predicate: predicate)
-        return (try? modelContext.fetchCount(descriptor)) ?? 0
-    }
-
-    /// Parse subproject filename to extract metadata
-    /// Format: .subproject-ProjectName-GroupName-2025-12-08T14-30-00.als
-    private var parsedSubprojectInfo: (projectName: String, groupName: String, timestamp: String)? {
-        guard liveSet.category == .subproject else { return nil }
-
-        let name = liveSet.name
-        guard name.hasPrefix(".subproject-") else { return nil }
-
-        let withoutPrefix = String(name.dropFirst(".subproject-".count))
-
-        // Find timestamp at the end (format: YYYY-MM-DDTHH-MM-SS)
-        let timestampPattern = #"\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}$"#
-        guard let regex = try? NSRegularExpression(pattern: timestampPattern),
-              let match = regex.firstMatch(in: withoutPrefix, range: NSRange(withoutPrefix.startIndex..., in: withoutPrefix)),
-              let timestampRange = Range(match.range, in: withoutPrefix) else {
-            return nil
-        }
-
-        let timestamp = String(withoutPrefix[timestampRange])
-        let beforeTimestamp = withoutPrefix[..<timestampRange.lowerBound]
-            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
-
-        // Split remaining by last hyphen to get projectName-groupName
-        if let lastHyphen = beforeTimestamp.lastIndex(of: "-") {
-            let projectName = String(beforeTimestamp[..<lastHyphen])
-            let groupName = String(beforeTimestamp[beforeTimestamp.index(after: lastHyphen)...])
-            return (projectName, groupName, timestamp)
-        }
-
-        return (beforeTimestamp, "", timestamp)
-    }
-
-    /// Format timestamp from 2025-12-08T14-30-00 to readable format
-    private func formatTimestamp(_ timestamp: String) -> String {
-        let parts = timestamp.split(separator: "T")
-        guard parts.count == 2 else { return timestamp }
-        let date = parts[0]
-        let time = parts[1].replacingOccurrences(of: "-", with: ":")
-        return "\(date) \(time)"
-    }
-
-    var body: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 4) {
-                if liveSet.category == .subproject {
-                    // Subproject header
-                    HStack(spacing: 6) {
-                        Image(systemName: "doc.badge.gearshape.fill")
-                            .foregroundColor(.purple)
-                        Text("SUBPROJECT")
-                            .font(.caption)
-                            .fontWeight(.semibold)
-                            .foregroundColor(.purple)
-                    }
-
-                    if let info = parsedSubprojectInfo {
-                        Text(info.groupName.isEmpty ? info.projectName : info.groupName)
-                            .font(.title)
-                            .fontWeight(.bold)
-
-                        HStack(spacing: 12) {
-                            HStack(spacing: 4) {
-                                Image(systemName: "folder")
-                                    .font(.caption)
-                                Text(info.projectName)
-                                    .font(.caption)
-                            }
-                            .foregroundColor(.secondary)
-
-                            if !info.groupName.isEmpty {
-                                HStack(spacing: 4) {
-                                    Image(systemName: "folder.fill")
-                                        .font(.caption)
-                                    Text(info.groupName)
-                                        .font(.caption)
-                                }
-                                .foregroundColor(.secondary)
-                            }
-
-                            HStack(spacing: 4) {
-                                Image(systemName: "clock")
-                                    .font(.caption)
-                                Text(formatTimestamp(info.timestamp))
-                                    .font(.caption)
-                            }
-                            .foregroundColor(.secondary)
-                        }
-                    } else if liveSet.hasMetadata {
-                        // Fallback to stored metadata
-                        Text(liveSet.sourceGroupName ?? liveSet.name)
-                            .font(.title)
-                            .fontWeight(.bold)
-
-                        HStack(spacing: 12) {
-                            HStack(spacing: 4) {
-                                Image(systemName: "doc")
-                                    .font(.caption)
-                                Text(liveSet.sourceLiveSetName ?? "Unknown")
-                                    .font(.caption)
-                            }
-                            .foregroundColor(.secondary)
-
-                            if let extractedAt = liveSet.extractedAt {
-                                HStack(spacing: 4) {
-                                    Image(systemName: "clock")
-                                        .font(.caption)
-                                    Text(extractedAt.formatted(date: .abbreviated, time: .shortened))
-                                        .font(.caption)
-                                }
-                                .foregroundColor(.secondary)
-                            }
-                        }
-                    } else {
-                        Text(liveSet.name)
-                            .font(.title)
-                            .fontWeight(.bold)
-                    }
-                } else {
-                    // Normal LiveSet header
-                    Text(liveSet.name)
-                        .font(.title)
-                        .fontWeight(.bold)
-                    Text(liveSet.path)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                if isSaving {
-                    HStack(spacing: 8) {
-                        ProgressView()
-                            .controlSize(.small)
-                        Text("Saving...")
-                            .foregroundColor(.secondary)
-                    }
-                } else if hasUnsavedChanges {
-                    Button {
-                        showSaveConfirmation = true
-                    } label: {
-                        Label("Save to new Live Set", systemImage: "square.and.arrow.down")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .help("Save changes to a new version of this Live Set")
-                }
-            }
-            Spacer()
-
-            // Save button (visible when there are unsaved changes)
-
-
-            VStack(alignment: .trailing) {
-                Text("Ableton Live \(liveSet.liveVersion)")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                Text("\(groupCount) groups")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-        }
-        .padding()
-        .background(Color(nsColor: .controlBackgroundColor))
-        .confirmationDialog("Save Changes", isPresented: $showSaveConfirmation) {
-            Button("Save to new Live Set") {
-                saveChangesToNewLiveSet()
-            }
-            Button("Cancel", role: .cancel) { }
-        } message: {
-            let count = modifiedTracks.count
-            Text("This will create a new version of the .als file with \(count) renamed track\(count == 1 ? "" : "s"). The original file will remain unchanged.")
-        }
-        .alert("Changes Saved", isPresented: $showOpenPrompt) {
-            Button("Open in Ableton") {
-                if let path = savedPath {
-                    NSWorkspace.shared.open(URL(fileURLWithPath: path))
-                }
-            }
-            Button("Later", role: .cancel) { }
-        } message: {
-            Text("Would you like to open the new Live Set in Ableton Live?")
-        }
-        .alert("Save Error", isPresented: $showSaveError) {
-            Button("OK", role: .cancel) { }
-        } message: {
-            Text(saveError ?? "Unknown error")
-        }
-    }
-
-    private func saveChangesToNewLiveSet() {
-        guard let project = liveSet.project else {
-            saveError = "No project found for this Live Set"
-            showSaveError = true
-            return
-        }
-
-        isSaving = true
-
-        // Collect track name changes: [trackId: newName]
-        var nameChanges: [Int: String] = [:]
-        for track in modifiedTracks {
-            nameChanges[track.trackId] = track.name
-        }
-
-        // Generate output path as a version file
-        let timestamp = ISO8601DateFormatter().string(from: Date())
-            .replacingOccurrences(of: ":", with: "-")
-            .prefix(19)  // Remove timezone
-        let baseName = liveSet.name
-        let outputFileName = ".version-\(baseName)-\(timestamp).als"
-        let outputPath = (project.path as NSString).appendingPathComponent(outputFileName)
-
-        // Use AlsModifier to save changes
-        let modifier = AlsModifier()
-        let result = modifier.saveWithModifiedTrackNames(
-            inputPath: liveSet.path,
-            outputPath: outputPath,
-            nameChanges: nameChanges
-        )
-
-        isSaving = false
-
-        if result.success {
-            savedPath = outputPath
-
-            // Reparse the original LiveSet from disk to reset track state
-            // This ensures we stay in sync with the truth on disk
-            ProjectManager.shared.parseLiveSet(liveSet)
-
-            // Navigate to the new version in the sidebar
-            UIState.shared.selectedLiveSetPath = outputPath
-
-            showOpenPrompt = true
-        } else {
-            saveError = result.error ?? "Unknown error"
-            showSaveError = true
-        }
-    }
-}
-
-struct InspectorContent: View {
-    let liveSet: SDLiveSet
-    @Query private var tracks: [SDTrack]
-
-    init(liveSet: SDLiveSet) {
-        self.liveSet = liveSet
-        let selectedId = UIState.shared.selectedTrackId
-        let liveSetPath = liveSet.path
-        if let trackId = selectedId {
-            let predicate = #Predicate<SDTrack> { track in
-                track.liveSet?.path == liveSetPath && track.trackId == trackId
-            }
-            _tracks = Query(filter: predicate)
-        } else {
-            // No track selected - empty query
-            let predicate = #Predicate<SDTrack> { _ in false }
-            _tracks = Query(filter: predicate)
-        }
-    }
-
-    var body: some View {
-        if let selectedTrack = tracks.first {
-            SDTrackInspectorView(track: selectedTrack)
-        } else {
-            SDLiveSetInspectorView(liveSet: liveSet)
-        }
-    }
-}
-
-// MARK: - Track List View
-
-struct TrackListView: View {
-    @Query private var rootTracks: [SDTrack]
-
-    init(liveSetPath: String) {
-        let predicate = #Predicate<SDTrack> { track in
-            track.liveSet?.path == liveSetPath && track.parentGroupId == nil
-        }
-        _rootTracks = Query(filter: predicate, sort: [SortDescriptor(\SDTrack.sortIndex)])
-    }
-
-    var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(rootTracks, id: \.trackId) { track in
-                    SDTrackRow(track: track, depth: 0)
-                }
-            }
-            .padding()
-        }
-    }
-}
-
-struct SDTrackRow: View {
-    var track: SDTrack
-    let depth: Int
-    @State private var isExpanded = false
-    @State private var isExtracting = false
-    @State private var extractionError: String?
-    @State private var showError = false
-    @State private var showOpenPrompt = false
-    @State private var extractedPath: String?
-    @State private var isEditingName = false
-    @State private var editingText = ""  // Local state for TextField to avoid per-keystroke model updates
-    @FocusState private var isNameFieldFocused: Bool
-
-    private var isSelected: Bool {
-        UIState.shared.selectedTrackId == track.trackId
-    }
+struct TrackRow: View {
+    var track: Track
+    let liveSetPath: String
+    @State private var isEditing: Bool = false
+    @State private var editingText: String = ""
+    @State private var isExpanded: Bool = false
+    @State private var children: [Track] = []
+    @State private var observationTask: Task<Void, Never>?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                // Indentation
-                ForEach(0..<depth, id: \.self) { _ in
-                    Rectangle()
-                        .fill(Color.clear)
-                        .frame(width: 20)
-                }
-
-                // Expand/collapse chevron for groups
+            HStack(spacing: 8) {
+                // Expand/collapse for groups
                 if track.isGroup {
-                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                        .foregroundColor(.secondary)
-                        .frame(width: 16)
-                        .onTapGesture {
-                            isExpanded.toggle()
+                    Button {
+                        isExpanded.toggle()
+                        if isExpanded && children.isEmpty {
+                            loadChildren()
                         }
+                    } label: {
+                        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .frame(width: 16)
                 } else {
-                    Rectangle()
-                        .fill(Color.clear)
-                        .frame(width: 16)
+                    Spacer().frame(width: 16)
                 }
 
                 // Track icon
                 Image(systemName: iconForTrackType(track.type))
                     .foregroundColor(colorForTrackType(track.type))
-                    .frame(width: 20)
 
-                // Track name (editable on double-click)
-                if isEditingName {
-                    TextField("Track name", text: $editingText)
-                        .textFieldStyle(.plain)
-                        .fontWeight(track.isGroup ? .medium : .regular)
-                        .focused($isNameFieldFocused)
-                        .onSubmit {
-                            // Commit edit to model only on submit
-                            track.name = editingText
-                            track.isModified = (track.name != track.originalName)
-                            isEditingName = false
-                        }
-                        .onExitCommand {
-                            // Discard edit on escape
-                            isEditingName = false
-                        }
+                // Editable name
+                if isEditing {
+                    TextField("Track name", text: $editingText, onCommit: {
+                        commitNameChange()
+                    })
+                    .textFieldStyle(.roundedBorder)
+                    .onExitCommand {
+                        isEditing = false
+                        editingText = track.name
+                    }
                 } else {
                     Text(track.name)
-                        .fontWeight(track.isGroup ? .medium : .regular)
                         .onTapGesture(count: 2) {
-                            editingText = track.name  // Initialize with current name
-                            isEditingName = true
-                            isNameFieldFocused = true
+                            editingText = track.name
+                            isEditing = true
                         }
                 }
 
-                // Modified indicator
+                Spacer()
+
+                // Indicators
                 if track.isModified {
                     Image(systemName: "pencil.circle.fill")
                         .foregroundColor(.orange)
                         .font(.caption)
-                        .help("Name changed from '\(track.originalName)'")
                 }
 
-                // DEBUG: Show sortIndex
-//                Text(track.sortIndex)
-//                    .font(.caption2)
-//                    .foregroundColor(.orange)
-//                    .padding(.horizontal, 4)
-//                    .background(Color.orange.opacity(0.1))
-//                    .cornerRadius(2)
-
-                Spacer()
-
-                // Extraction indicator
-                if isExtracting {
-                    ProgressView()
-                        .controlSize(.small)
+                if track.subprojectPath != nil {
+                    Image(systemName: "link.circle.fill")
+                        .foregroundColor(.purple)
+                        .font(.caption)
                 }
 
-                // Subproject indicator
-                if let subprojectPath = track.subprojectPath {
-                    Button {
-                        navigateToSubproject(path: subprojectPath)
-                    } label: {
-                        HStack(spacing: 4) {
-                            if track.bounceReady {
-                                Image(systemName: "arrow.down.circle.fill")
-                                    .foregroundColor(.green)
-                                Text("Bounce Ready")
-                                    .font(.caption)
-                                    .foregroundColor(.green)
-                            } else {
-                                Image(systemName: "doc.badge.arrow.up")
-                                    .foregroundColor(.blue)
-                                Text("Subproject")
-                                    .font(.caption)
-                                    .foregroundColor(.blue)
-                            }
-                        }
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(track.bounceReady ? Color.green.opacity(0.1) : Color.blue.opacity(0.1))
-                        .cornerRadius(4)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Go to subproject")
+                if track.bounceReady {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                        .font(.caption)
                 }
             }
-            .padding(.vertical, 6)
-            .padding(.horizontal, 8)
-            .background(
-                isSelected
-                    ? Color.accentColor.opacity(0.2)
-                    : (track.isGroup ? Color(nsColor: .controlBackgroundColor).opacity(0.5) : Color.clear)
-            )
-            .cornerRadius(4)
-            .contentShape(Rectangle())
-            .onTapGesture {
-                if isSelected && track.isGroup {
-                    // Second click on selected group toggles expand/collapse
-                    isExpanded.toggle()
-                } else {
-                    UIState.shared.selectedTrackId = track.trackId
-                }
-            }
-            .contextMenu {
-                Button("Rename") {
-                    editingText = track.name
-                    isEditingName = true
-                    isNameFieldFocused = true
-                }
-
-                if track.isModified {
-                    Button("Undo Name Change") {
-                        track.name = track.originalName
-                        track.isModified = false
-                    }
-                }
-
-                if track.isGroup {
-                    Divider()
-                    Button("Extract as Subproject") {
-                        extractAsSubproject()
-                    }
-                    .disabled(isExtracting || track.liveSet?.project == nil)
-                }
-            }
-            .alert("Extraction Error", isPresented: $showError) {
-                Button("OK", role: .cancel) { }
-            } message: {
-                Text(extractionError ?? "Unknown error")
-            }
-            .alert("Subproject Created", isPresented: $showOpenPrompt) {
-                Button("Open in Ableton") {
-                    if let path = extractedPath {
-                        openInAbleton(path: path)
-                    }
-                }
-                Button("Later", role: .cancel) { }
-            } message: {
-                Text("Would you like to open the subproject in Ableton Live?")
-            }
+            .padding(.vertical, 4)
 
             // Children (if expanded)
-            if track.isGroup && isExpanded {
-                ChildTracksView(liveSetPath: track.liveSet?.path ?? "", parentGroupId: track.trackId, depth: depth + 1)
-            }
-        }
-    }
-
-    private func navigateToSubproject(path: String) {
-        UIState.shared.selectedLiveSetPath = path
-        UIState.shared.selectedTrackId = nil
-    }
-
-    private func extractAsSubproject() {
-        guard let liveSet = track.liveSet,
-              let project = liveSet.project else { return }
-
-        let safeName = track.name.replacingOccurrences(of: "/", with: "-")
-        let timestamp = ISO8601DateFormatter().string(from: Date())
-            .replacingOccurrences(of: ":", with: "-")
-        let fileName = ".subproject-\(project.name)-\(safeName)-\(timestamp).als"
-        let outputPath = URL(fileURLWithPath: project.path).appendingPathComponent(fileName).path
-
-        isExtracting = true
-
-        ProjectManager.shared.extractSubproject(
-            from: liveSet.path,
-            groupId: track.trackId,
-            groupName: track.name,
-            sourceLiveSetName: liveSet.name,
-            to: outputPath,
-            projectPath: project.path
-        ) { result in
-            DispatchQueue.main.async {
-                isExtracting = false
-
-                if let path = result {
-                    print("Extracted subproject to: \(path)")
-                    extractedPath = path
-                    showOpenPrompt = true
-                    ProjectManager.shared.rescanProject(projectPath: project.path)
-                } else {
-                    extractionError = "Failed to extract subproject"
-                    showError = true
+            if isExpanded && !children.isEmpty {
+                ForEach(children, id: \.trackId) { child in
+                    TrackRow(track: child, liveSetPath: liveSetPath)
+                        .padding(.leading, 24)
                 }
             }
         }
+        .onAppear {
+            if track.isGroup && isExpanded {
+                loadChildren()
+            }
+        }
+        .onDisappear {
+            observationTask?.cancel()
+        }
     }
 
-    private func openInAbleton(path: String) {
-        let url = URL(fileURLWithPath: path)
-        NSWorkspace.shared.open(url)
-    }
-
-    private func iconForTrackType(_ type: SDTrackType) -> String {
+    private func iconForTrackType(_ type: TrackType) -> String {
         switch type {
         case .audio: return "waveform"
         case .midi: return "pianokeys"
@@ -1190,7 +608,7 @@ struct SDTrackRow: View {
         }
     }
 
-    private func colorForTrackType(_ type: SDTrackType) -> Color {
+    private func colorForTrackType(_ type: TrackType) -> Color {
         switch type {
         case .audio: return .orange
         case .midi: return .purple
@@ -1198,24 +616,188 @@ struct SDTrackRow: View {
         case .returnTrack: return .green
         }
     }
-}
 
-/// Subview to fetch child tracks with predicate
-struct ChildTracksView: View {
-    @Query private var children: [SDTrack]
-    let depth: Int
+    private func commitNameChange() {
+        isEditing = false
+        guard editingText != track.name else { return }
 
-    init(liveSetPath: String, parentGroupId: Int, depth: Int) {
-        self.depth = depth
-        let predicate = #Predicate<SDTrack> { track in
-            track.liveSet?.path == liveSetPath && track.parentGroupId == parentGroupId
+        // Get project path from liveSetPath
+        let projectPath = URL(fileURLWithPath: liveSetPath).deletingLastPathComponent().path
+        guard let projectDb = ProjectManager.shared.database(forProjectPath: projectPath) else { return }
+
+        var updatedTrack = track
+        updatedTrack.name = editingText
+        updatedTrack.isModified = (editingText != track.originalName)
+
+        do {
+            try projectDb.updateTrack(updatedTrack)
+        } catch {
+            print("Failed to update track: \(error)")
+            editingText = track.name
         }
-        _children = Query(filter: predicate, sort: [SortDescriptor(\SDTrack.sortIndex)])
     }
 
+    private func loadChildren() {
+        // Get project path from liveSetPath
+        let projectPath = URL(fileURLWithPath: liveSetPath).deletingLastPathComponent().path
+        guard let projectDb = ProjectManager.shared.database(forProjectPath: projectPath),
+              let db = projectDb.dbQueue else { return }
+
+        observationTask?.cancel()
+        observationTask = Task {
+            let observation = projectDb.observeChildTracks(forLiveSetPath: liveSetPath, parentGroupId: track.trackId)
+            do {
+                for try await fetched in observation.values(in: db) {
+                    children = fetched
+                }
+            } catch {
+                // Observation cancelled
+            }
+        }
+    }
+}
+
+// MARK: - Inspector Content
+
+struct InspectorContent: View {
+    let liveSet: LiveSet
+    @State private var selectedTrack: Track?
+    @State private var observationTask: Task<Void, Never>?
+
     var body: some View {
-        ForEach(children, id: \.trackId) { child in
-            SDTrackRow(track: child, depth: depth)
+        Group {
+            if let selectedTrack = selectedTrack {
+                TrackInspectorView(track: selectedTrack, liveSetPath: liveSet.path)
+            } else {
+                LiveSetInspectorView(liveSet: liveSet)
+            }
+        }
+        .onAppear {
+            startObserving()
+        }
+        .onDisappear {
+            observationTask?.cancel()
+        }
+        .onChange(of: UIState.shared.selectedTrackId) { _, _ in
+            startObserving()
+        }
+    }
+
+    private func startObserving() {
+        guard let trackId = UIState.shared.selectedTrackId,
+              let projectPath = liveSet.projectPath,
+              let projectDb = ProjectManager.shared.database(forProjectPath: projectPath),
+              let db = projectDb.dbQueue else {
+            selectedTrack = nil
+            return
+        }
+
+        observationTask?.cancel()
+        observationTask = Task {
+            let observation = ValueObservation.tracking { db in
+                try Track
+                    .filter(Column("liveSetPath") == liveSet.path)
+                    .filter(Column("trackId") == trackId)
+                    .fetchOne(db)
+            }
+            do {
+                for try await track in observation.values(in: db) {
+                    selectedTrack = track
+                }
+            } catch {
+                // Observation cancelled
+            }
+        }
+    }
+}
+
+// MARK: - Nested Track Row (for groups)
+
+struct NestedTrackRow: View {
+    let track: Track
+    let liveSetPath: String
+    let depth: Int
+    @State private var isExpanded = false
+    @State private var children: [Track] = []
+    @State private var observationTask: Task<Void, Never>?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                // Indentation
+                Spacer().frame(width: CGFloat(depth * 16))
+
+                // Expand/collapse for groups
+                if track.isGroup {
+                    Button {
+                        isExpanded.toggle()
+                        if isExpanded {
+                            loadChildren()
+                        }
+                    } label: {
+                        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    Spacer().frame(width: 16)
+                }
+
+                // Track icon
+                Image(systemName: iconForTrackType(track.type))
+                    .foregroundColor(colorForTrackType(track.type))
+
+                Text(track.name)
+
+                Spacer()
+            }
+            .padding(.vertical, 2)
+
+            // Children
+            if isExpanded {
+                ForEach(children, id: \.trackId) { child in
+                    NestedTrackRow(track: child, liveSetPath: liveSetPath, depth: depth + 1)
+                }
+            }
+        }
+        .onDisappear {
+            observationTask?.cancel()
+        }
+    }
+
+    private func iconForTrackType(_ type: TrackType) -> String {
+        switch type {
+        case .audio: return "waveform"
+        case .midi: return "pianokeys"
+        case .group: return "folder.fill"
+        case .returnTrack: return "arrow.turn.up.right"
+        }
+    }
+
+    private func colorForTrackType(_ type: TrackType) -> Color {
+        switch type {
+        case .audio: return .orange
+        case .midi: return .purple
+        case .group: return .blue
+        case .returnTrack: return .green
+        }
+    }
+
+    private func loadChildren() {
+        let projectPath = URL(fileURLWithPath: liveSetPath).deletingLastPathComponent().path
+        guard let projectDb = ProjectManager.shared.database(forProjectPath: projectPath),
+              let db = projectDb.dbQueue else { return }
+
+        observationTask?.cancel()
+        observationTask = Task {
+            let observation = projectDb.observeChildTracks(forLiveSetPath: liveSetPath, parentGroupId: track.trackId)
+            do {
+                for try await fetched in observation.values(in: db) {
+                    children = fetched
+                }
+            } catch {
+                // Observation cancelled
+            }
         }
     }
 }

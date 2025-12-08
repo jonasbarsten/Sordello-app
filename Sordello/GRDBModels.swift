@@ -1,17 +1,18 @@
 //
-//  SwiftDataModels.swift
+//  GRDBModels.swift
 //  Sordello
 //
+//  GRDB models replacing SwiftData
 //  Created by Jonas Barsten on 08/12/2025.
 //
 
 import Foundation
-import SwiftData
+import GRDB
 
 // MARK: - Enums
 
 /// Category of a Live Set within a project
-enum SDLiveSetCategory: String, Codable, CaseIterable {
+enum LiveSetCategory: String, Codable, CaseIterable, DatabaseValueConvertible {
     case main       // Main .als files in root
     case subproject // Files starting with .subproject-
     case version    // Files starting with .version-
@@ -19,7 +20,7 @@ enum SDLiveSetCategory: String, Codable, CaseIterable {
 }
 
 /// Track type in Ableton
-enum SDTrackType: String, Codable {
+enum TrackType: String, Codable, DatabaseValueConvertible {
     case audio = "AudioTrack"
     case midi = "MidiTrack"
     case group = "GroupTrack"
@@ -27,26 +28,21 @@ enum SDTrackType: String, Codable {
 }
 
 /// Sort order for lists
-enum SDSortOrder: String, Codable {
+enum SortOrder: String, Codable {
     case ascending
     case descending
 }
 
-// MARK: - SwiftData Models
+// MARK: - GRDB Models
 
 /// Represents an Ableton Live Project folder
-@Model
-final class SDProject {
-    /// Unique identifier - folder path
-    @Attribute(.unique) var path: String
-    var lastUpdated: Date = Date()
+struct Project: Codable, Identifiable, FetchableRecord, PersistableRecord, Sendable {
+    static let databaseTableName = "projects"
 
-    /// Relationships
-    @Relationship(deleteRule: .cascade, inverse: \SDLiveSet.project)
-    var liveSets: [SDLiveSet] = []
-
-    @Relationship(deleteRule: .cascade, inverse: \SDConnectedDevice.project)
-    var devices: [SDConnectedDevice] = []
+    /// Primary key - folder path
+    var id: String { path }
+    var path: String
+    var lastUpdated: Date
 
     /// Computed: Project name (folder name without " Project" suffix)
     var name: String {
@@ -58,26 +54,41 @@ final class SDProject {
         self.path = path
         self.lastUpdated = Date()
     }
+
+    // MARK: - Associations
+    static let liveSets = hasMany(LiveSet.self)
+    static let devices = hasMany(ConnectedDevice.self)
+
+    var liveSets: QueryInterfaceRequest<LiveSet> {
+        request(for: Project.liveSets)
+    }
+
+    var devices: QueryInterfaceRequest<ConnectedDevice> {
+        request(for: Project.devices)
+    }
 }
 
 /// Represents an individual .als file (Live Set)
-@Model
-final class SDLiveSet {
-    /// Unique identifier - file path
-    @Attribute(.unique) var path: String
+struct LiveSet: Codable, Identifiable, FetchableRecord, PersistableRecord, Sendable {
+    static let databaseTableName = "live_sets"
 
-    /// Category stored as raw string for predicate support
-    var categoryRaw: String = SDLiveSetCategory.main.rawValue
+    /// Primary key - file path
+    var id: String { path }
+    var path: String
 
-    var liveVersion: String = "Unknown"
+    /// Foreign key to project
+    var projectPath: String?
+
+    var category: LiveSetCategory
+    var liveVersion: String
     var comment: String?
-    var lastUpdated: Date = Date()
+    var lastUpdated: Date
 
     /// File modification date on disk (for detecting changes)
     var fileModificationDate: Date?
 
     /// Whether the .als file has been parsed (tracks extracted)
-    var isParsed: Bool = false
+    var isParsed: Bool
 
     /// For backup files: extracted timestamp from filename for sorting
     var backupTimestamp: Date?
@@ -91,18 +102,6 @@ final class SDLiveSet {
     var sourceGroupName: String?
     var extractedAt: Date?
 
-    /// Relationships
-    var project: SDProject?
-
-    @Relationship(deleteRule: .cascade, inverse: \SDTrack.liveSet)
-    var tracks: [SDTrack] = []
-
-    /// Computed: Category enum
-    var category: SDLiveSetCategory {
-        get { SDLiveSetCategory(rawValue: categoryRaw) ?? .main }
-        set { categoryRaw = newValue.rawValue }
-    }
-
     /// Computed: Name from path
     var name: String {
         URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
@@ -113,21 +112,12 @@ final class SDLiveSet {
         sourceLiveSetName != nil && sourceGroupId != nil
     }
 
-    /// Computed: Has unsaved changes (any track names modified)
-    /// Uses the stored isModified flag for efficient checking
-    var hasUnsavedChanges: Bool {
-        tracks.contains { $0.isModified }
-    }
-
-    /// Get all tracks with modified names
-    var modifiedTracks: [SDTrack] {
-        tracks.filter { $0.isModified }
-    }
-
-    init(path: String, category: SDLiveSetCategory) {
+    init(path: String, category: LiveSetCategory) {
         self.path = path
-        self.categoryRaw = category.rawValue
+        self.category = category
+        self.liveVersion = "Unknown"
         self.lastUpdated = Date()
+        self.isParsed = false
 
         // Extract backup timestamp if this is a backup
         if category == .backup {
@@ -153,55 +143,63 @@ final class SDLiveSet {
         formatter.dateFormat = "yyyy-MM-dd HHmmss"
         return formatter.date(from: "\(dateStr) \(timeStr)")
     }
+
+    // MARK: - Associations
+    static let project = belongsTo(Project.self)
+    static let tracks = hasMany(Track.self)
+
+    var project: QueryInterfaceRequest<Project> {
+        request(for: LiveSet.project)
+    }
+
+    var tracks: QueryInterfaceRequest<Track> {
+        request(for: LiveSet.tracks)
+    }
 }
 
 /// Represents a track in an Ableton project
-@Model
-final class SDTrack {
+struct Track: Codable, Identifiable, FetchableRecord, PersistableRecord, Sendable {
+    static let databaseTableName = "tracks"
+
+    /// Compound primary key: liveSetPath + trackId
+    var id: String { "\(liveSetPath ?? ""):\(trackId)" }
+
+    /// Foreign key to LiveSet
+    var liveSetPath: String?
+
     /// Ableton track ID (unique within a LiveSet)
-    var trackId: Int = 0
-    var name: String = ""
+    var trackId: Int
+    var name: String
 
     /// Original name from the .als file (for detecting changes)
-    var originalName: String = ""
+    var originalName: String
 
     /// Stored flag for efficient querying of modified tracks
-    /// Set to true when name differs from originalName, false when reverted or saved
-    var isModified: Bool = false
+    var isModified: Bool
 
-    /// Track type stored as raw string for predicate support
-    var typeRaw: String = SDTrackType.audio.rawValue
+    var type: TrackType
 
     /// Parent group track ID (-1 or nil means root level)
     var parentGroupId: Int?
 
-    /// Lexicographic fractional index for visual ordering (preserves Ableton's track order)
-    var sortIndex: String = "a"
+    /// Lexicographic fractional index for visual ordering
+    var sortIndex: String
 
     /// Link to subproject if this group was extracted
     var subprojectPath: String?
-    var bounceReady: Bool = false
+    var bounceReady: Bool
 
     /// Track properties
-    var color: Int = 0
-    var isFrozen: Bool = false
-    var trackDelay: Double = 0
-    var isDelayInSamples: Bool = false
+    var color: Int
+    var isFrozen: Bool
+    var trackDelay: Double
+    var isDelayInSamples: Bool
 
-    /// Routing (stored as JSON strings for simplicity)
+    /// Routing (stored as JSON strings)
     var audioInputJSON: String?
     var audioOutputJSON: String?
     var midiInputJSON: String?
     var midiOutputJSON: String?
-
-    /// Relationships
-    var liveSet: SDLiveSet?
-
-    /// Computed: Track type enum
-    var type: SDTrackType {
-        get { SDTrackType(rawValue: typeRaw) ?? .audio }
-        set { typeRaw = newValue.rawValue }
-    }
 
     /// Computed: Is this a group track
     var isGroup: Bool {
@@ -230,17 +228,24 @@ final class SDTrack {
         return colors[color]
     }
 
-    init(trackId: Int, name: String, type: SDTrackType, parentGroupId: Int?) {
+    init(trackId: Int, name: String, type: TrackType, parentGroupId: Int?) {
         self.trackId = trackId
         self.name = name
-        self.originalName = name  // Store original for change detection
-        self.typeRaw = type.rawValue
+        self.originalName = name
+        self.type = type
         self.parentGroupId = parentGroupId == -1 ? nil : parentGroupId
+        self.sortIndex = "a"
+        self.isModified = false
+        self.bounceReady = false
+        self.color = 0
+        self.isFrozen = false
+        self.trackDelay = 0
+        self.isDelayInSamples = false
     }
 
     // MARK: - Routing Helpers
 
-    struct RoutingInfo: Codable {
+    struct RoutingInfo: Codable, Sendable {
         let target: String
         let displayName: String
         let channel: String
@@ -285,21 +290,32 @@ final class SDTrack {
             midiOutputJSON = newValue.flatMap { try? String(data: JSONEncoder().encode($0), encoding: .utf8) }
         }
     }
+
+    // MARK: - Associations
+    static let liveSet = belongsTo(LiveSet.self)
+
+    var liveSet: QueryInterfaceRequest<LiveSet> {
+        request(for: Track.liveSet)
+    }
 }
 
 /// Represents a connected M4L device
-@Model
-final class SDConnectedDevice {
-    @Attribute(.unique) var instanceId: String
-    var projectPath: String = ""
-    var liveVersion: String = ""
-    var connectedAt: Date = Date()
+struct ConnectedDevice: Codable, Identifiable, FetchableRecord, PersistableRecord, Sendable {
+    static let databaseTableName = "connected_devices"
 
-    /// Relationships
-    var project: SDProject?
+    /// Primary key
+    var id: String { instanceId }
+    var instanceId: String
+
+    /// Foreign key to project
+    var projectPath: String?
+
+    var liveVersion: String
+    var connectedAt: Date
 
     var projectName: String {
-        URL(fileURLWithPath: projectPath).deletingPathExtension().lastPathComponent
+        guard let path = projectPath else { return "Unknown" }
+        return URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
     }
 
     init(instanceId: String, projectPath: String, liveVersion: String) {
@@ -308,11 +324,19 @@ final class SDConnectedDevice {
         self.liveVersion = liveVersion
         self.connectedAt = Date()
     }
+
+    // MARK: - Associations
+    static let project = belongsTo(Project.self)
+
+    var project: QueryInterfaceRequest<Project> {
+        request(for: ConnectedDevice.project)
+    }
 }
 
 // MARK: - App State (Non-persisted UI state)
 
 /// UI state that doesn't need persistence - kept in memory
+@MainActor
 @Observable
 final class UIState {
     static let shared = UIState()
@@ -321,101 +345,8 @@ final class UIState {
     var selectedLiveSetPath: String?
     var selectedTrackId: Int?
     var isInspectorVisible: Bool = false
-    var liveSetSortOrder: SDSortOrder = .ascending
+    var liveSetSortOrder: SortOrder = .ascending
     var expandedLiveSets: Set<String> = []
 
     private init() {}
-}
-
-// MARK: - Predicates
-
-/// Predicate builders for querying SwiftData
-enum SDPredicates {
-    /// LiveSets for a specific project
-    static func liveSets(forProjectPath projectPath: String) -> Predicate<SDLiveSet> {
-        #Predicate<SDLiveSet> { liveSet in
-            liveSet.project?.path == projectPath
-        }
-    }
-
-    /// Main LiveSets for a project
-    static func mainLiveSets(forProjectPath projectPath: String) -> Predicate<SDLiveSet> {
-        let mainCategory = SDLiveSetCategory.main.rawValue
-        return #Predicate<SDLiveSet> { liveSet in
-            liveSet.project?.path == projectPath && liveSet.categoryRaw == mainCategory
-        }
-    }
-
-    /// Subproject LiveSets for a project
-    static func subprojectLiveSets(forProjectPath projectPath: String) -> Predicate<SDLiveSet> {
-        let subprojectCategory = SDLiveSetCategory.subproject.rawValue
-        return #Predicate<SDLiveSet> { liveSet in
-            liveSet.project?.path == projectPath && liveSet.categoryRaw == subprojectCategory
-        }
-    }
-
-    /// Backup LiveSets for a project
-    static func backupLiveSets(forProjectPath projectPath: String) -> Predicate<SDLiveSet> {
-        let backupCategory = SDLiveSetCategory.backup.rawValue
-        return #Predicate<SDLiveSet> { liveSet in
-            liveSet.project?.path == projectPath && liveSet.categoryRaw == backupCategory
-        }
-    }
-
-    /// Version LiveSets for a specific parent LiveSet
-    static func versionLiveSets(forParentPath parentPath: String) -> Predicate<SDLiveSet> {
-        let versionCategory = SDLiveSetCategory.version.rawValue
-        return #Predicate<SDLiveSet> { liveSet in
-            liveSet.categoryRaw == versionCategory && liveSet.parentLiveSetPath == parentPath
-        }
-    }
-
-    /// Tracks for a specific LiveSet
-    static func tracks(forLiveSetPath liveSetPath: String) -> Predicate<SDTrack> {
-        #Predicate<SDTrack> { track in
-            track.liveSet?.path == liveSetPath
-        }
-    }
-
-    /// Root level tracks for a LiveSet
-    static func rootTracks(forLiveSetPath liveSetPath: String) -> Predicate<SDTrack> {
-        #Predicate<SDTrack> { track in
-            track.liveSet?.path == liveSetPath && track.parentGroupId == nil
-        }
-    }
-
-    /// Child tracks of a group
-    static func childTracks(forLiveSetPath liveSetPath: String, parentGroupId: Int) -> Predicate<SDTrack> {
-        #Predicate<SDTrack> { track in
-            track.liveSet?.path == liveSetPath && track.parentGroupId == parentGroupId
-        }
-    }
-
-    /// Tracks of a specific type in a LiveSet
-    static func tracks(forLiveSetPath liveSetPath: String, type: SDTrackType) -> Predicate<SDTrack> {
-        let typeRaw = type.rawValue
-        return #Predicate<SDTrack> { track in
-            track.liveSet?.path == liveSetPath && track.typeRaw == typeRaw
-        }
-    }
-}
-
-// MARK: - Sort Descriptors
-
-/// Sort descriptor builders
-enum SDSortDescriptors {
-    /// Main LiveSets sorted by name
-    static func liveSetsByName(ascending: Bool = true) -> SortDescriptor<SDLiveSet> {
-        SortDescriptor(\SDLiveSet.path, order: ascending ? .forward : .reverse)
-    }
-
-    /// Backup LiveSets sorted by timestamp
-    static var backupsByTimestamp: SortDescriptor<SDLiveSet> {
-        SortDescriptor(\SDLiveSet.backupTimestamp, order: .reverse)
-    }
-
-    /// Tracks by sortIndex (preserves visual order from Ableton)
-    static var tracksBySortIndex: SortDescriptor<SDTrack> {
-        SortDescriptor(\SDTrack.sortIndex, order: .forward)
-    }
 }

@@ -146,7 +146,7 @@ nonisolated final class AlsParser {
         let name = getTrackName(element)
         let groupId = getTrackGroupId(element)
 
-        let trackType: Track.TrackType
+        let trackType: TrackType
         switch type {
         case "MidiTrack": trackType = .midi
         case "AudioTrack": trackType = .audio
@@ -156,7 +156,7 @@ nonisolated final class AlsParser {
         }
 
         var track = Track(
-            id: id,
+            trackId: id,
             name: name,
             type: trackType,
             parentGroupId: groupId == -1 ? nil : groupId
@@ -222,7 +222,7 @@ nonisolated final class AlsParser {
         return (0, false)
     }
 
-    private func getRouting(from deviceChain: XMLElement, name: String) -> TrackRouting? {
+    private func getRouting(from deviceChain: XMLElement, name: String) -> Track.RoutingInfo? {
         guard let routingElement = deviceChain.elements(forName: name).first else {
             return nil
         }
@@ -239,7 +239,7 @@ nonisolated final class AlsParser {
             return nil
         }
 
-        return TrackRouting(target: target, displayName: displayName, channel: channel)
+        return Track.RoutingInfo(target: target, displayName: displayName, channel: channel)
     }
 }
 

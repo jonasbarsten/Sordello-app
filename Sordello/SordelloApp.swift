@@ -6,63 +6,24 @@
 //
 
 import SwiftUI
-import SwiftData
 import AppKit
 import UniformTypeIdentifiers
+import GRDB
 
 @main
 struct SordelloApp: App {
-    let modelContainer: ModelContainer
 
     init() {
-        // Delete existing database files BEFORE creating container (fresh start each launch)
-        Self.deleteSwiftDataFiles()
-
-        do {
-            let schema = Schema([
-                SDProject.self,
-                SDLiveSet.self,
-                SDTrack.self,
-                SDConnectedDevice.self
-            ])
-            let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
-            modelContainer = try ModelContainer(for: schema, configurations: [modelConfiguration])
-            print("Created fresh ModelContainer")
-        } catch {
-            fatalError("Failed to create ModelContainer: \(error)")
-        }
+        // Per-project databases are created when projects are opened
+        // No global app database initialization needed
     }
 
-    /// Delete SwiftData database files before container creation
-    private static func deleteSwiftDataFiles() {
-        let fileManager = FileManager.default
-        guard let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
-            return
-        }
-
-        // SwiftData stores files with .store extension
-        let storeFiles = ["default.store", "default.store-shm", "default.store-wal"]
-        for fileName in storeFiles {
-            let fileUrl = appSupport.appendingPathComponent(fileName)
-            if fileManager.fileExists(atPath: fileUrl.path) {
-                do {
-                    try fileManager.removeItem(at: fileUrl)
-                } catch {
-                    print("Failed to delete \(fileName): \(error)")
-                }
-            }
-        }
-        print("Cleared SwiftData on launch")
-    }
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
         WindowGroup {
             ContentView()
-                .onAppear {
-                    OSCServer.shared.start()
-                }
         }
-        .modelContainer(modelContainer)
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("Open Project...") {
@@ -70,21 +31,69 @@ struct SordelloApp: App {
                 }
                 .keyboardShortcut("o", modifiers: .command)
             }
+
+            CommandGroup(after: .newItem) {
+                Divider()
+                Button("GRDB Test Windows") {
+                    openWindow(id: "grdb-test")
+                    openWindow(id: "grdb-observer")
+                }
+                .keyboardShortcut("t", modifiers: [.command, .shift])
+            }
         }
+
+        // Test window for GRDB proof of concept
+        WindowGroup("GRDB Test", id: "grdb-test") {
+            GRDBTestView()
+        }
+        .defaultSize(width: 500, height: 600)
+
+        // Observer window - proves reactive updates work across windows
+        WindowGroup("GRDB Observer", id: "grdb-observer") {
+            GRDBObserverWindow()
+        }
+        .defaultSize(width: 400, height: 500)
     }
 }
 
 /// Manages project opening and file access
-/// Now writes to SwiftData instead of in-memory state
+/// Uses per-project GRDB databases for persistence
 @MainActor
+@Observable
 final class ProjectManager {
     static let shared = ProjectManager()
 
     /// Store security-scoped bookmarks for file access
     private var bookmarks: [String: Data] = [:]
 
-    /// Reference to the model context (set from views)
-    var modelContext: ModelContext?
+    /// Per-project databases keyed by project path
+    private var projectDatabases: [String: ProjectDatabase] = [:]
+
+    /// List of currently open project paths (for UI)
+    private(set) var openProjectPaths: [String] = []
+
+    /// Get the database for a project
+    func database(forProjectPath path: String) -> ProjectDatabase? {
+        return projectDatabases[path]
+    }
+
+    /// Get the current project's database (convenience for UI state)
+    var currentDatabase: ProjectDatabase? {
+        guard let path = UIState.shared.selectedProjectPath else { return nil }
+        return projectDatabases[path]
+    }
+
+    /// Get all open projects with their data
+    func getOpenProjects() -> [Project] {
+        var projects: [Project] = []
+        for path in openProjectPaths {
+            if let db = projectDatabases[path],
+               let project = try? db.fetchProject() {
+                projects.append(project)
+            }
+        }
+        return projects.sorted { $0.lastUpdated > $1.lastUpdated }
+    }
 
     private init() {}
 
@@ -183,33 +192,55 @@ final class ProjectManager {
         }
     }
 
-    /// Load a project folder and scan for .als files - writes to SwiftData
+    /// Load a project folder and scan for .als files - writes to per-project GRDB database
     func loadProject(at folderUrl: URL) {
-        guard let context = modelContext else {
-            print("No ModelContext available")
-            return
-        }
-
         // Start accessing for initial load
         let accessing = folderUrl.startAccessingSecurityScopedResource()
 
         // Fix any _subproject files first
         fixSubprojectFilenames(in: folderUrl)
 
-        // Get or create the project in SwiftData
-        let project = getOrCreateProject(path: folderUrl.path, context: context)
+        do {
+            // Create or get the project database at .sordello/db/sordello.db
+            let projectDb: ProjectDatabase
+            if let existing = projectDatabases[folderUrl.path] {
+                projectDb = existing
+            } else {
+                projectDb = ProjectDatabase(projectPath: folderUrl.path)
+                try projectDb.setup()
+                projectDatabases[folderUrl.path] = projectDb
+            }
 
-        // Scan and save LiveSets
-        scanAndSaveLiveSets(in: folderUrl, for: project, context: context)
+            // Get or create the project record
+            let project = try projectDb.getOrCreateProject()
 
-        // Select the project in UI state
-        UIState.shared.selectedProjectPath = project.path
+            // Check if we already have LiveSets (database existed with data)
+            let existingLiveSets = try projectDb.fetchAllLiveSets()
 
-        // Auto-select the first main LiveSet
-        let mainPredicate = SDPredicates.mainLiveSets(forProjectPath: project.path)
-        let descriptor = FetchDescriptor<SDLiveSet>(predicate: mainPredicate, sortBy: [SDSortDescriptors.liveSetsByName()])
-        if let firstMain = try? context.fetch(descriptor).first {
-            UIState.shared.selectedLiveSetPath = firstMain.path
+            if existingLiveSets.isEmpty {
+                // Fresh database - do full scan
+                print("Fresh project database, doing full scan...")
+                try scanAndSaveLiveSets(in: folderUrl, for: project, db: projectDb)
+            } else {
+                // Existing data - do incremental update to preserve parsed data
+                print("Existing project database with \(existingLiveSets.count) LiveSets, doing incremental update...")
+                try incrementalUpdate(in: folderUrl, for: project, db: projectDb)
+            }
+
+            // Add to open projects list if not already there
+            if !openProjectPaths.contains(project.path) {
+                openProjectPaths.append(project.path)
+            }
+
+            // Select the project in UI state
+            UIState.shared.selectedProjectPath = project.path
+
+            // Auto-select the first main LiveSet
+            if let firstMain = try projectDb.fetchMainLiveSets().first {
+                UIState.shared.selectedLiveSetPath = firstMain.path
+            }
+        } catch {
+            print("Failed to load project: \(error)")
         }
 
         if accessing { folderUrl.stopAccessingSecurityScopedResource() }
@@ -223,31 +254,14 @@ final class ProjectManager {
         }
     }
 
-    /// Get or create a project in SwiftData
-    private func getOrCreateProject(path: String, context: ModelContext) -> SDProject {
-        let predicate = #Predicate<SDProject> { $0.path == path }
-        let descriptor = FetchDescriptor<SDProject>(predicate: predicate)
-
-        if let existing = try? context.fetch(descriptor).first {
-            return existing
-        }
-
-        let project = SDProject(path: path)
-        context.insert(project)
-        return project
-    }
-
-    /// Scan folder and save LiveSets to SwiftData
-    private func scanAndSaveLiveSets(in folderUrl: URL, for project: SDProject, context: ModelContext) {
+    /// Scan folder and save LiveSets to project database
+    private func scanAndSaveLiveSets(in folderUrl: URL, for project: Project, db: ProjectDatabase) throws {
         let fileManager = FileManager.default
 
-        // Delete existing LiveSets and tracks for this project
-        let existingLiveSets = project.liveSets
-        for liveSet in existingLiveSets {
-            context.delete(liveSet)
-        }
+        // Delete existing LiveSets for this project
+        try db.deleteAllLiveSets()
 
-        var mainLiveSetPaths: [String: SDLiveSet] = [:]
+        var mainLiveSetPaths: [String: LiveSet] = [:]
 
         // Scan root folder for .als files
         if let rootContents = try? fileManager.contentsOfDirectory(at: folderUrl, includingPropertiesForKeys: nil) {
@@ -255,23 +269,23 @@ final class ProjectManager {
                 let fileName = fileUrl.lastPathComponent
 
                 if fileName.hasPrefix(".subproject-") {
-                    let liveSet = SDLiveSet(path: fileUrl.path, category: .subproject)
-                    loadSubprojectMetadata(for: liveSet, folderUrl: folderUrl)
+                    var liveSet = LiveSet(path: fileUrl.path, category: .subproject)
+                    liveSet.projectPath = project.path
+                    loadSubprojectMetadata(for: &liveSet, folderUrl: folderUrl)
                     liveSet.comment = loadComment(for: fileUrl)
                     liveSet.fileModificationDate = getFileModificationDate(for: fileUrl)
-                    liveSet.project = project
-                    context.insert(liveSet)
+                    try db.insertLiveSet(liveSet)
 
                 } else if fileName.hasPrefix(".version-") {
                     // Version files are handled after main LiveSets
                     continue
 
                 } else {
-                    let liveSet = SDLiveSet(path: fileUrl.path, category: .main)
+                    var liveSet = LiveSet(path: fileUrl.path, category: .main)
+                    liveSet.projectPath = project.path
                     liveSet.comment = loadComment(for: fileUrl)
                     liveSet.fileModificationDate = getFileModificationDate(for: fileUrl)
-                    liveSet.project = project
-                    context.insert(liveSet)
+                    try db.insertLiveSet(liveSet)
                     mainLiveSetPaths[liveSet.name] = liveSet
                 }
             }
@@ -285,12 +299,12 @@ final class ProjectManager {
                 if fileName.hasPrefix(".version-"),
                    let parentName = extractParentName(from: fileName),
                    let parentLiveSet = mainLiveSetPaths[parentName] {
-                    let liveSet = SDLiveSet(path: fileUrl.path, category: .version)
+                    var liveSet = LiveSet(path: fileUrl.path, category: .version)
+                    liveSet.projectPath = project.path
                     liveSet.parentLiveSetPath = parentLiveSet.path
                     liveSet.comment = loadComment(for: fileUrl)
                     liveSet.fileModificationDate = getFileModificationDate(for: fileUrl)
-                    liveSet.project = project
-                    context.insert(liveSet)
+                    try db.insertLiveSet(liveSet)
                 }
             }
         }
@@ -299,33 +313,29 @@ final class ProjectManager {
         let backupUrl = folderUrl.appendingPathComponent("Backup")
         if let backupContents = try? fileManager.contentsOfDirectory(at: backupUrl, includingPropertiesForKeys: nil) {
             for fileUrl in backupContents where fileUrl.pathExtension.lowercased() == "als" {
-                let liveSet = SDLiveSet(path: fileUrl.path, category: .backup)
+                var liveSet = LiveSet(path: fileUrl.path, category: .backup)
+                liveSet.projectPath = project.path
                 liveSet.comment = loadComment(for: fileUrl)
                 liveSet.fileModificationDate = getFileModificationDate(for: fileUrl)
-                liveSet.project = project
-                context.insert(liveSet)
+                try db.insertLiveSet(liveSet)
             }
         }
 
-        project.lastUpdated = Date()
+        // Update project timestamp
+        var updatedProject = project
+        updatedProject.lastUpdated = Date()
+        try db.updateProject(updatedProject)
 
-        do {
-            try context.save()
-            print("Saved project with \(project.liveSets.count) LiveSets to SwiftData")
-        } catch {
-            print("Failed to save to SwiftData: \(error)")
-        }
+        let liveSets = try db.fetchAllLiveSets()
+        print("Saved project with \(liveSets.count) LiveSets to project database")
 
-        // Start background parsing (we're still in security-scoped access)
-        let liveSetPaths = project.liveSets.map { $0.path }
-        let projectPath = project.path
-        parseAllLiveSetsInBackground(liveSetPaths: liveSetPaths, projectPath: projectPath)
+        // Start background parsing
+        let liveSetPaths = liveSets.map { $0.path }
+        parseAllLiveSetsInBackground(liveSetPaths: liveSetPaths, projectPath: project.path)
     }
 
     /// Parse all LiveSets in background using parallel TaskGroup
     private func parseAllLiveSetsInBackground(liveSetPaths: [String], projectPath: String) {
-        guard let context = modelContext else { return }
-
         // Get bookmark data on MainActor BEFORE entering background task
         guard let bookmarkData = bookmarks[projectPath] else {
             print("No bookmark found for project: \(projectPath)")
@@ -335,7 +345,6 @@ final class ProjectManager {
         print("Starting parallel parsing of \(liveSetPaths.count) LiveSets...")
         let startTime = Date()
 
-        // Launch a Task (inherits MainActor but immediately goes to background via @concurrent)
         Task {
             // Resolve bookmark ONCE for all files
             var isStale = false
@@ -355,10 +364,8 @@ final class ProjectManager {
             }
             defer { folderUrl.stopAccessingSecurityScopedResource() }
 
-            // Parse files in parallel, write to SwiftData in batches
+            // Parse files in parallel
             var completedCount = 0
-            var pendingSaveCount = 0
-            let batchSize = 20  // Save every 20 files to reduce UI updates
 
             await withTaskGroup(of: AlsParseResult.self) { group in
                 for path in liveSetPaths {
@@ -377,101 +384,83 @@ final class ProjectManager {
                         continue
                     }
 
-                    // Write to SwiftData (but don't save yet)
+                    // Write to project database on MainActor
                     await MainActor.run {
-                        let pathToFind = result.path
-                        let predicate = #Predicate<SDLiveSet> { $0.path == pathToFind }
-                        let descriptor = FetchDescriptor<SDLiveSet>(predicate: predicate)
+                        do {
+                            guard let projectDb = self.projectDatabases[projectPath] else { return }
+                            guard var liveSet = try projectDb.fetchLiveSet(path: result.path) else { return }
+                            guard !liveSet.isParsed else { return }
 
-                        guard let liveSet = try? context.fetch(descriptor).first else { return }
-                        guard !liveSet.isParsed else { return }
+                            // Update LiveSet with parsed data
+                            liveSet.liveVersion = result.liveVersion ?? "Unknown"
+                            liveSet.isParsed = true
+                            liveSet.lastUpdated = Date()
 
-                        // Delete existing tracks
-                        for track in liveSet.tracks {
-                            context.delete(track)
+                            // Create Track objects from parsed data
+                            var tracks: [Track] = []
+                            for parsedTrack in result.tracks {
+                                var track = Track(
+                                    trackId: parsedTrack.trackId,
+                                    name: parsedTrack.name,
+                                    type: parsedTrack.type,
+                                    parentGroupId: parsedTrack.parentGroupId
+                                )
+                                track.liveSetPath = liveSet.path
+                                track.sortIndex = parsedTrack.sortIndex
+                                track.color = parsedTrack.color
+                                track.isFrozen = parsedTrack.isFrozen
+                                track.trackDelay = parsedTrack.trackDelay
+                                track.isDelayInSamples = parsedTrack.isDelayInSamples
+
+                                if let routing = parsedTrack.audioInput {
+                                    track.audioInput = Track.RoutingInfo(target: routing.target, displayName: routing.displayName, channel: routing.channel)
+                                }
+                                if let routing = parsedTrack.audioOutput {
+                                    track.audioOutput = Track.RoutingInfo(target: routing.target, displayName: routing.displayName, channel: routing.channel)
+                                }
+                                if let routing = parsedTrack.midiInput {
+                                    track.midiInput = Track.RoutingInfo(target: routing.target, displayName: routing.displayName, channel: routing.channel)
+                                }
+                                if let routing = parsedTrack.midiOutput {
+                                    track.midiOutput = Track.RoutingInfo(target: routing.target, displayName: routing.displayName, channel: routing.channel)
+                                }
+
+                                tracks.append(track)
+                            }
+
+                            // Save LiveSet with all tracks
+                            try projectDb.saveLiveSetWithTracks(liveSet, tracks: tracks)
+
+                        } catch {
+                            print("Failed to save parsed LiveSet: \(error)")
                         }
-
-                        // Create SDTrack objects from parsed data
-                        liveSet.liveVersion = result.liveVersion ?? "Unknown"
-
-                        for parsedTrack in result.tracks {
-                            let track = SDTrack(
-                                trackId: parsedTrack.id,
-                                name: parsedTrack.name,
-                                type: SDTrackType(rawValue: parsedTrack.type.rawValue) ?? .audio,
-                                parentGroupId: parsedTrack.parentGroupId
-                            )
-                            track.sortIndex = parsedTrack.sortIndex
-                            track.color = parsedTrack.color
-                            track.isFrozen = parsedTrack.isFrozen
-                            track.trackDelay = parsedTrack.trackDelay
-                            track.isDelayInSamples = parsedTrack.isDelayInSamples
-
-                            if let routing = parsedTrack.audioInput {
-                                track.audioInput = SDTrack.RoutingInfo(target: routing.target, displayName: routing.displayName, channel: routing.channel)
-                            }
-                            if let routing = parsedTrack.audioOutput {
-                                track.audioOutput = SDTrack.RoutingInfo(target: routing.target, displayName: routing.displayName, channel: routing.channel)
-                            }
-                            if let routing = parsedTrack.midiInput {
-                                track.midiInput = SDTrack.RoutingInfo(target: routing.target, displayName: routing.displayName, channel: routing.channel)
-                            }
-                            if let routing = parsedTrack.midiOutput {
-                                track.midiOutput = SDTrack.RoutingInfo(target: routing.target, displayName: routing.displayName, channel: routing.channel)
-                            }
-
-                            track.liveSet = liveSet
-                            context.insert(track)
-                        }
-
-                        liveSet.isParsed = true
-                        liveSet.lastUpdated = Date()
-                        pendingSaveCount += 1
-
-                        // Batch save: only save every N files to reduce UI lag
-                        if pendingSaveCount >= batchSize {
-                            try? context.save()
-                            pendingSaveCount = 0
-                        }
-                    }
-                }
-
-                // Final save for any remaining unsaved items
-                await MainActor.run {
-                    if pendingSaveCount > 0 {
-                        try? context.save()
                     }
                 }
             }
 
             print("Parsed \(completedCount)/\(liveSetPaths.count) files in \(Date().timeIntervalSince(startTime).formatted(.number.precision(.fractionLength(1))))s")
 
-            // Link tracks to subprojects (quick operation at the end)
+            // Link tracks to subprojects
             await MainActor.run {
-                ProjectManager.shared.accessFile(at: projectPath) { _ in
-                    let projectPredicate = #Predicate<SDProject> { $0.path == projectPath }
-                    let projectDescriptor = FetchDescriptor<SDProject>(predicate: projectPredicate)
-
-                    guard let project = try? context.fetch(projectDescriptor).first else { return }
-
-                    for liveSet in project.liveSets where liveSet.category == .main {
-                        ProjectManager.shared.linkTracksToSubprojects(liveSet: liveSet, context: context)
-                    }
-
+                self.accessFile(at: projectPath) { _ in
                     do {
-                        try context.save()
+                        guard let projectDb = self.projectDatabases[projectPath] else { return }
+                        let mainLiveSets = try projectDb.fetchMainLiveSets()
+                        for liveSet in mainLiveSets {
+                            self.linkTracksToSubprojects(liveSet: liveSet, projectPath: projectPath)
+                        }
                         let totalTime = Date().timeIntervalSince(startTime)
                         print("Finished background parsing all LiveSets in \(totalTime.formatted(.number.precision(.fractionLength(1))))s")
                     } catch {
-                        print("Failed to save after linking subprojects: \(error)")
+                        print("Failed to link subprojects: \(error)")
                     }
                 }
             }
         }
     }
 
-    /// Internal parsing method - used when already in security-scoped access
-    private func parseLiveSetInternal(_ liveSet: SDLiveSet, context: ModelContext) {
+    /// Internal parsing method
+    private func parseLiveSetInternal(_ liveSet: LiveSet) {
         let alsUrl = URL(fileURLWithPath: liveSet.path)
 
         let parser = AlsParser()
@@ -480,69 +469,61 @@ final class ProjectManager {
             return
         }
 
-        // Delete existing tracks for this LiveSet
-        for track in liveSet.tracks {
-            context.delete(track)
-        }
-
-        // Parse and save tracks
+        // Parse tracks
         let parsedTracks = parser.getTracks()
-        liveSet.liveVersion = parser.liveVersion ?? "Unknown"
 
+        var updatedLiveSet = liveSet
+        updatedLiveSet.liveVersion = parser.liveVersion ?? "Unknown"
+        updatedLiveSet.isParsed = true
+        updatedLiveSet.lastUpdated = Date()
+
+        var tracks: [Track] = []
         for parsedTrack in parsedTracks {
-            let track = SDTrack(
-                trackId: parsedTrack.id,
+            var track = Track(
+                trackId: parsedTrack.trackId,
                 name: parsedTrack.name,
-                type: SDTrackType(rawValue: parsedTrack.type.rawValue) ?? .audio,
+                type: parsedTrack.type,
                 parentGroupId: parsedTrack.parentGroupId
             )
+            track.liveSetPath = liveSet.path
             track.sortIndex = parsedTrack.sortIndex
             track.color = parsedTrack.color
             track.isFrozen = parsedTrack.isFrozen
             track.trackDelay = parsedTrack.trackDelay
             track.isDelayInSamples = parsedTrack.isDelayInSamples
 
-            // Convert routing info
             if let routing = parsedTrack.audioInput {
-                track.audioInput = SDTrack.RoutingInfo(
-                    target: routing.target,
-                    displayName: routing.displayName,
-                    channel: routing.channel
-                )
+                track.audioInput = Track.RoutingInfo(target: routing.target, displayName: routing.displayName, channel: routing.channel)
             }
             if let routing = parsedTrack.audioOutput {
-                track.audioOutput = SDTrack.RoutingInfo(
-                    target: routing.target,
-                    displayName: routing.displayName,
-                    channel: routing.channel
-                )
+                track.audioOutput = Track.RoutingInfo(target: routing.target, displayName: routing.displayName, channel: routing.channel)
             }
             if let routing = parsedTrack.midiInput {
-                track.midiInput = SDTrack.RoutingInfo(
-                    target: routing.target,
-                    displayName: routing.displayName,
-                    channel: routing.channel
-                )
+                track.midiInput = Track.RoutingInfo(target: routing.target, displayName: routing.displayName, channel: routing.channel)
             }
             if let routing = parsedTrack.midiOutput {
-                track.midiOutput = SDTrack.RoutingInfo(
-                    target: routing.target,
-                    displayName: routing.displayName,
-                    channel: routing.channel
-                )
+                track.midiOutput = Track.RoutingInfo(target: routing.target, displayName: routing.displayName, channel: routing.channel)
             }
 
-            track.liveSet = liveSet
-            context.insert(track)
+            tracks.append(track)
         }
 
-        liveSet.isParsed = true
-        liveSet.lastUpdated = Date()
-        print("Parsed \(parsedTracks.count) tracks from \(liveSet.name) (Live \(liveSet.liveVersion))")
+        guard let projectPath = liveSet.projectPath,
+              let projectDb = projectDatabases[projectPath] else {
+            print("Failed to save parsed LiveSet: no project database found")
+            return
+        }
+
+        do {
+            try projectDb.saveLiveSetWithTracks(updatedLiveSet, tracks: tracks)
+            print("Parsed \(tracks.count) tracks from \(liveSet.name) (Live \(updatedLiveSet.liveVersion))")
+        } catch {
+            print("Failed to save parsed LiveSet: \(error)")
+        }
     }
 
     /// Load subproject metadata from companion JSON file
-    private func loadSubprojectMetadata(for liveSet: SDLiveSet, folderUrl: URL) {
+    private func loadSubprojectMetadata(for liveSet: inout LiveSet, folderUrl: URL) {
         let baseName = URL(fileURLWithPath: liveSet.path).deletingPathExtension().lastPathComponent
         let metadataFileName = "\(baseName)-meta.json"
         let metadataUrl = folderUrl.appendingPathComponent(metadataFileName)
@@ -643,50 +624,46 @@ final class ProjectManager {
         return nil
     }
 
-    /// Parse a specific LiveSet and save tracks to SwiftData
-    func parseLiveSet(_ liveSet: SDLiveSet) {
-        guard let context = modelContext,
-              let projectPath = liveSet.project?.path else { return }
+    /// Parse a specific LiveSet
+    func parseLiveSet(_ liveSet: LiveSet) {
+        guard let projectPath = liveSet.projectPath else { return }
 
         accessFile(at: projectPath) { _ in
-            parseLiveSetInternal(liveSet, context: context)
-            linkTracksToSubprojects(liveSet: liveSet, context: context)
-
-            do {
-                try context.save()
-            } catch {
-                print("Failed to save tracks: \(error)")
-            }
+            self.parseLiveSetInternal(liveSet)
+            self.linkTracksToSubprojects(liveSet: liveSet, projectPath: projectPath)
         }
     }
 
     /// Link group tracks to their extracted subprojects
-    private func linkTracksToSubprojects(liveSet: SDLiveSet, context: ModelContext) {
-        guard let projectPath = liveSet.project?.path else { return }
+    private func linkTracksToSubprojects(liveSet: LiveSet, projectPath: String) {
+        guard let projectDb = projectDatabases[projectPath] else { return }
 
-        // Find subprojects for this LiveSet
-        let subprojectPredicate = SDPredicates.subprojectLiveSets(forProjectPath: projectPath)
-        let descriptor = FetchDescriptor<SDLiveSet>(predicate: subprojectPredicate)
+        do {
+            // Find subprojects for this LiveSet
+            let subprojects = try projectDb.fetchSubprojectLiveSets()
 
-        guard let subprojects = try? context.fetch(descriptor) else { return }
-
-        // Build map of source group ID -> subproject path
-        var subprojectsByGroupId: [Int: String] = [:]
-        for subproject in subprojects {
-            if let sourceGroupId = subproject.sourceGroupId,
-               subproject.sourceLiveSetName == liveSet.name {
-                subprojectsByGroupId[sourceGroupId] = subproject.path
+            // Build map of source group ID -> subproject path
+            var subprojectsByGroupId: [Int: String] = [:]
+            for subproject in subprojects {
+                if let sourceGroupId = subproject.sourceGroupId,
+                   subproject.sourceLiveSetName == liveSet.name {
+                    subprojectsByGroupId[sourceGroupId] = subproject.path
+                }
             }
-        }
 
-        guard !subprojectsByGroupId.isEmpty else { return }
+            guard !subprojectsByGroupId.isEmpty else { return }
 
-        // Update tracks
-        for track in liveSet.tracks where track.isGroup {
-            if let subprojectPath = subprojectsByGroupId[track.trackId] {
-                track.subprojectPath = subprojectPath
-                print("Linked group '\(track.name)' (ID: \(track.trackId)) to subproject")
+            // Update tracks
+            let tracks = try projectDb.fetchTracks(forLiveSetPath: liveSet.path)
+            for var track in tracks where track.isGroup {
+                if let subprojectPath = subprojectsByGroupId[track.trackId] {
+                    track.subprojectPath = subprojectPath
+                    try projectDb.updateTrack(track)
+                    print("Linked group '\(track.name)' (ID: \(track.trackId)) to subproject")
+                }
             }
+        } catch {
+            print("Failed to link tracks to subprojects: \(error)")
         }
     }
 
@@ -695,39 +672,37 @@ final class ProjectManager {
         try? FileManager.default.attributesOfItem(atPath: fileUrl.path)[.modificationDate] as? Date
     }
 
-    /// Reload a project folder after changes - only processes changed files
+    /// Reload a project folder after changes
     private func reloadProject(folderPath: String) {
-        guard let context = modelContext else { return }
-
         accessFile(at: folderPath) { folderUrl in
             // Fix filenames first
             self.fixSubprojectFilenames(in: folderUrl)
 
-            // Find the project
-            let predicate = #Predicate<SDProject> { $0.path == folderPath }
-            let descriptor = FetchDescriptor<SDProject>(predicate: predicate)
-
-            guard let project = try? context.fetch(descriptor).first else { return }
-
-            // Incremental update: only process changed files
-            self.incrementalUpdate(in: folderUrl, for: project, context: context)
+            do {
+                guard let projectDb = self.projectDatabases[folderPath],
+                      let project = try projectDb.fetchProject() else { return }
+                try self.incrementalUpdate(in: folderUrl, for: project, db: projectDb)
+            } catch {
+                print("Failed to reload project: \(error)")
+            }
         }
     }
 
     /// Incrementally update LiveSets - only re-parse changed files
-    private func incrementalUpdate(in folderUrl: URL, for project: SDProject, context: ModelContext) {
+    private func incrementalUpdate(in folderUrl: URL, for project: Project, db: ProjectDatabase) throws {
         let fileManager = FileManager.default
 
         // Build map of existing LiveSets by path
-        var existingByPath: [String: SDLiveSet] = [:]
-        for liveSet in project.liveSets {
+        let existingLiveSets = try db.fetchAllLiveSets()
+        var existingByPath: [String: LiveSet] = [:]
+        for liveSet in existingLiveSets {
             existingByPath[liveSet.path] = liveSet
         }
 
         // Collect current files on disk
         var currentFilePaths: Set<String> = []
-        var changedLiveSets: [SDLiveSet] = []
-        var newLiveSets: [SDLiveSet] = []
+        var changedLiveSets: [LiveSet] = []
+        var newLiveSets: [LiveSet] = []
 
         // Scan root folder
         if let rootContents = try? fileManager.contentsOfDirectory(at: folderUrl, includingPropertiesForKeys: [.contentModificationDateKey]) {
@@ -738,18 +713,19 @@ final class ProjectManager {
 
                 let currentModDate = getFileModificationDate(for: fileUrl)
 
-                if let existing = existingByPath[filePath] {
-                    // Check if file was modified
+                if var existing = existingByPath[filePath] {
+                    // Check if file was modified (1 second tolerance for float precision)
                     if let storedDate = existing.fileModificationDate,
                        let currentDate = currentModDate,
-                       currentDate > storedDate {
+                       currentDate.timeIntervalSince(storedDate) > 1.0 {
                         existing.fileModificationDate = currentDate
+                        try db.updateLiveSet(existing)
                         changedLiveSets.append(existing)
                         print("File changed: \(existing.name)")
                     }
                 } else {
                     // New file
-                    let category: SDLiveSetCategory
+                    let category: LiveSetCategory
                     if fileName.hasPrefix(".subproject-") {
                         category = .subproject
                     } else if fileName.hasPrefix(".version-") {
@@ -758,27 +734,24 @@ final class ProjectManager {
                         category = .main
                     }
 
-                    let liveSet = SDLiveSet(path: filePath, category: category)
+                    var liveSet = LiveSet(path: filePath, category: category)
+                    liveSet.projectPath = project.path
                     liveSet.comment = loadComment(for: fileUrl)
                     liveSet.fileModificationDate = currentModDate
-                    liveSet.project = project
-                    context.insert(liveSet)
 
                     if category == .subproject {
-                        loadSubprojectMetadata(for: liveSet, folderUrl: folderUrl)
+                        loadSubprojectMetadata(for: &liveSet, folderUrl: folderUrl)
                     } else if category == .version {
                         // Link version to its parent LiveSet
                         if let parentName = extractParentName(from: fileName) {
-                            // Find the parent LiveSet by matching the name
-                            for existingLiveSet in project.liveSets where existingLiveSet.category == .main {
-                                if existingLiveSet.name == parentName {
-                                    liveSet.parentLiveSetPath = existingLiveSet.path
-                                    break
-                                }
+                            let mainLiveSets = try db.fetchMainLiveSets()
+                            if let parent = mainLiveSets.first(where: { $0.name == parentName }) {
+                                liveSet.parentLiveSetPath = parent.path
                             }
                         }
                     }
 
+                    try db.insertLiveSet(liveSet)
                     newLiveSets.append(liveSet)
                     print("New file: \(liveSet.name)")
                 }
@@ -794,20 +767,22 @@ final class ProjectManager {
 
                 let currentModDate = getFileModificationDate(for: fileUrl)
 
-                if let existing = existingByPath[filePath] {
+                if var existing = existingByPath[filePath] {
+                    // Check if file was modified (1 second tolerance for float precision)
                     if let storedDate = existing.fileModificationDate,
                        let currentDate = currentModDate,
-                       currentDate > storedDate {
+                       currentDate.timeIntervalSince(storedDate) > 1.0 {
                         existing.fileModificationDate = currentDate
+                        try db.updateLiveSet(existing)
                         changedLiveSets.append(existing)
                         print("File changed: \(existing.name)")
                     }
                 } else {
-                    let liveSet = SDLiveSet(path: filePath, category: .backup)
+                    var liveSet = LiveSet(path: filePath, category: .backup)
+                    liveSet.projectPath = project.path
                     liveSet.comment = loadComment(for: fileUrl)
                     liveSet.fileModificationDate = currentModDate
-                    liveSet.project = project
-                    context.insert(liveSet)
+                    try db.insertLiveSet(liveSet)
                     newLiveSets.append(liveSet)
                     print("New backup file: \(liveSet.name)")
                 }
@@ -815,10 +790,10 @@ final class ProjectManager {
         }
 
         // Remove deleted files
-        for (path, liveSet) in existingByPath {
+        for (path, _) in existingByPath {
             if !currentFilePaths.contains(path) {
-                print("Deleted file: \(liveSet.name)")
-                context.delete(liveSet)
+                print("Deleted file: \(existingByPath[path]?.name ?? path)")
+                try db.deleteLiveSet(path: path)
             }
         }
 
@@ -827,24 +802,17 @@ final class ProjectManager {
         if !toReparse.isEmpty {
             print("Re-parsing \(toReparse.count) LiveSet(s)...")
             for liveSet in toReparse {
-                // Wrap in autoreleasepool to free memory after each file is parsed
                 autoreleasepool {
-                    parseLiveSetInternal(liveSet, context: context)
+                    parseLiveSetInternal(liveSet)
                 }
             }
 
             // Re-link subprojects for main LiveSets that changed
             for liveSet in toReparse where liveSet.category == .main {
-                linkTracksToSubprojects(liveSet: liveSet, context: context)
+                linkTracksToSubprojects(liveSet: liveSet, projectPath: project.path)
             }
         } else {
             print("No files changed")
-        }
-
-        do {
-            try context.save()
-        } catch {
-            print("Failed to save incremental update: \(error)")
         }
     }
 
@@ -902,21 +870,20 @@ final class ProjectManager {
 
     /// Rescan a project folder to update the live sets list
     func rescanProject(projectPath: String) {
-        guard let context = modelContext else { return }
-
         accessFile(at: projectPath) { folderUrl in
-            let predicate = #Predicate<SDProject> { $0.path == projectPath }
-            let descriptor = FetchDescriptor<SDProject>(predicate: predicate)
-
-            guard let project = try? context.fetch(descriptor).first else { return }
-
-            self.scanAndSaveLiveSets(in: folderUrl, for: project, context: context)
+            do {
+                guard let projectDb = self.projectDatabases[projectPath],
+                      let project = try projectDb.fetchProject() else { return }
+                try self.scanAndSaveLiveSets(in: folderUrl, for: project, db: projectDb)
+            } catch {
+                print("Failed to rescan project: \(error)")
+            }
         }
     }
 
     /// Create a version of a LiveSet by copying it with a timestamp
-    func createVersion(of liveSet: SDLiveSet, comment: String? = nil) {
-        guard let projectPath = liveSet.project?.path else { return }
+    func createVersion(of liveSet: LiveSet, comment: String? = nil) {
+        guard let projectPath = liveSet.projectPath else { return }
 
         accessFile(at: projectPath) { folderUrl in
             let fileManager = FileManager.default
@@ -954,8 +921,8 @@ final class ProjectManager {
     }
 
     /// Save a comment for a LiveSet
-    func saveComment(for liveSet: SDLiveSet, comment: String) {
-        guard let projectPath = liveSet.project?.path else { return }
+    func saveComment(for liveSet: LiveSet, comment: String) {
+        guard let projectPath = liveSet.projectPath else { return }
 
         let url = URL(fileURLWithPath: liveSet.path)
         let baseName = url.deletingPathExtension().lastPathComponent
@@ -972,17 +939,17 @@ final class ProjectManager {
                         try FileManager.default.removeItem(at: commentUrl)
                         print("Deleted comment file: \(commentFileName)")
                     }
-                    liveSet.comment = nil
                 } else {
                     // Write the comment to file
                     try trimmedComment.write(to: commentUrl, atomically: true, encoding: .utf8)
                     print("Saved comment: \(commentFileName)")
-                    liveSet.comment = trimmedComment
                 }
 
-                if let context = self.modelContext {
-                    try context.save()
-                }
+                // Update LiveSet in database
+                guard let projectDb = self.projectDatabases[projectPath] else { return }
+                var updatedLiveSet = liveSet
+                updatedLiveSet.comment = trimmedComment.isEmpty ? nil : trimmedComment
+                try projectDb.updateLiveSet(updatedLiveSet)
             } catch {
                 print("Failed to save comment: \(error.localizedDescription)")
             }
