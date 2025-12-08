@@ -76,6 +76,9 @@ final class SDLiveSet {
     /// File modification date on disk (for detecting changes)
     var fileModificationDate: Date?
 
+    /// Whether the .als file has been parsed (tracks extracted)
+    var isParsed: Bool = false
+
     /// For backup files: extracted timestamp from filename for sorting
     var backupTimestamp: Date?
 
@@ -108,6 +111,17 @@ final class SDLiveSet {
     /// Computed: Has subproject metadata
     var hasMetadata: Bool {
         sourceLiveSetName != nil && sourceGroupId != nil
+    }
+
+    /// Computed: Has unsaved changes (any track names modified)
+    /// Uses the stored isModified flag for efficient checking
+    var hasUnsavedChanges: Bool {
+        tracks.contains { $0.isModified }
+    }
+
+    /// Get all tracks with modified names
+    var modifiedTracks: [SDTrack] {
+        tracks.filter { $0.isModified }
     }
 
     init(path: String, category: SDLiveSetCategory) {
@@ -148,11 +162,21 @@ final class SDTrack {
     var trackId: Int = 0
     var name: String = ""
 
+    /// Original name from the .als file (for detecting changes)
+    var originalName: String = ""
+
+    /// Stored flag for efficient querying of modified tracks
+    /// Set to true when name differs from originalName, false when reverted or saved
+    var isModified: Bool = false
+
     /// Track type stored as raw string for predicate support
     var typeRaw: String = SDTrackType.audio.rawValue
 
     /// Parent group track ID (-1 or nil means root level)
     var parentGroupId: Int?
+
+    /// Lexicographic fractional index for visual ordering (preserves Ableton's track order)
+    var sortIndex: String = "a"
 
     /// Link to subproject if this group was extracted
     var subprojectPath: String?
@@ -189,6 +213,11 @@ final class SDTrack {
         parentGroupId == nil || parentGroupId == -1
     }
 
+    /// Computed: Has the name been changed from the original
+    var hasNameChange: Bool {
+        name != originalName && !originalName.isEmpty
+    }
+
     /// Get a human-readable color name for the Ableton color index
     var colorName: String {
         let colors = [
@@ -204,6 +233,7 @@ final class SDTrack {
     init(trackId: Int, name: String, type: SDTrackType, parentGroupId: Int?) {
         self.trackId = trackId
         self.name = name
+        self.originalName = name  // Store original for change detection
         self.typeRaw = type.rawValue
         self.parentGroupId = parentGroupId == -1 ? nil : parentGroupId
     }
@@ -384,8 +414,8 @@ enum SDSortDescriptors {
         SortDescriptor(\SDLiveSet.backupTimestamp, order: .reverse)
     }
 
-    /// Tracks by trackId (preserves order from .als file)
-    static var tracksByTrackId: SortDescriptor<SDTrack> {
-        SortDescriptor(\SDTrack.trackId, order: .forward)
+    /// Tracks by sortIndex (preserves visual order from Ableton)
+    static var tracksBySortIndex: SortDescriptor<SDTrack> {
+        SortDescriptor(\SDTrack.sortIndex, order: .forward)
     }
 }

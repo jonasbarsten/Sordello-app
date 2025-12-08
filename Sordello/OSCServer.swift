@@ -155,7 +155,7 @@ class OSCServer {
 
     private func parseAndUpdateProject(alsPath: String, liveVersion: String) {
         let parser = AlsParser()
-        guard parser.loadFile(at: alsPath) else {
+        guard parser.loadFile(at: URL(fileURLWithPath: alsPath)) else {
             print("Failed to parse project: \(parser.errorMessage ?? "unknown error")")
             return
         }

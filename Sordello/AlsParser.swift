@@ -8,17 +8,35 @@
 import Foundation
 import Compression
 
-/// Parses Ableton Live Set (.als) files
-class AlsParser {
+/// Result of parsing an ALS file - Sendable for crossing concurrency boundaries
+struct AlsParseResult: Sendable {
+    let path: String
+    let tracks: [Track]
+    let liveVersion: String?
+    let errorMessage: String?
+}
+
+/// Parse a single .als file in the background
+/// @concurrent ensures this runs OFF MainActor for parallel execution
+@concurrent
+func parseAlsFileInBackground(at path: String) async -> AlsParseResult {
+    autoreleasepool {
+        let url = URL(fileURLWithPath: path)
+        let parser = AlsParser()
+        if parser.loadFile(at: url) {
+            return AlsParseResult(path: path, tracks: parser.getTracks(), liveVersion: parser.liveVersion, errorMessage: nil)
+        } else {
+            return AlsParseResult(path: path, tracks: [], liveVersion: nil, errorMessage: parser.errorMessage)
+        }
+    }
+}
+
+/// Parser for Ableton Live Set (.als) files
+/// nonisolated to allow usage from @concurrent functions
+nonisolated final class AlsParser {
     private var xmlDocument: XMLDocument?
     private(set) var errorMessage: String?
     private(set) var liveVersion: String?
-
-    /// Load and parse an .als file
-    func loadFile(at path: String) -> Bool {
-        let url = URL(fileURLWithPath: path)
-        return loadFile(at: url)
-    }
 
     func loadFile(at url: URL) -> Bool {
         xmlDocument = nil
@@ -79,14 +97,28 @@ class AlsParser {
         var tracks: [Track] = []
         let trackTypes = ["MidiTrack", "AudioTrack", "GroupTrack", "ReturnTrack"]
 
+        // Collect track elements first
+        var trackElements: [(element: XMLElement, tagName: String)] = []
         for child in tracksElement.children ?? [] {
             guard let element = child as? XMLElement,
                   let tagName = element.name,
                   trackTypes.contains(tagName) else {
                 continue
             }
+            trackElements.append((element, tagName))
+        }
 
-            let track = parseTrack(element, type: tagName)
+        // Generate fractional indices for all tracks (preserves XML/visual order)
+        let sortIndices = FractionalIndex.generateInitialIndices(count: trackElements.count)
+
+//        print("DEBUG: Generating \(trackElements.count) tracks with sortIndices")
+//        print("DEBUG: First 10 sortIndices: \(Array(sortIndices.prefix(10)))")
+
+        // Parse tracks with their sort indices
+        for (index, (element, tagName)) in trackElements.enumerated() {
+            var track = parseTrack(element, type: tagName)
+            track.sortIndex = sortIndices[index]
+//            print("DEBUG: Track[\(index)] '\(track.name)' → sortIndex '\(track.sortIndex)'")
             tracks.append(track)
         }
 

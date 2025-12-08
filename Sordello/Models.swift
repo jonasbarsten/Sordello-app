@@ -32,6 +32,7 @@ struct Track: Identifiable, Hashable {
     let name: String
     let type: TrackType
     let parentGroupId: Int?  // -1 or nil means root level
+    var sortIndex: String = FractionalIndex.first  // Lexicographic index for visual ordering
     var children: [Track] = []
     var subprojectPath: String? = nil
     var bounceReady: Bool = false

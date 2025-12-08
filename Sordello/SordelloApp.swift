@@ -311,37 +311,162 @@ final class ProjectManager {
 
         do {
             try context.save()
-            print("Saved project with LiveSets to SwiftData")
+            print("Saved project with \(project.liveSets.count) LiveSets to SwiftData")
         } catch {
             print("Failed to save to SwiftData: \(error)")
         }
 
-        // Parse all LiveSets upfront (we're already in security-scoped access)
-        parseAllLiveSets(for: project, context: context)
+        // Start background parsing (we're still in security-scoped access)
+        let liveSetPaths = project.liveSets.map { $0.path }
+        let projectPath = project.path
+        parseAllLiveSetsInBackground(liveSetPaths: liveSetPaths, projectPath: projectPath)
     }
 
-    /// Parse all LiveSets in a project and save tracks to SwiftData
-    private func parseAllLiveSets(for project: SDProject, context: ModelContext) {
-        let liveSets = project.liveSets
-        print("Parsing \(liveSets.count) LiveSets...")
+    /// Parse all LiveSets in background using parallel TaskGroup
+    private func parseAllLiveSetsInBackground(liveSetPaths: [String], projectPath: String) {
+        guard let context = modelContext else { return }
 
-        for liveSet in liveSets {
-            // Wrap in autoreleasepool to free memory after each file is parsed
-            autoreleasepool {
-                parseLiveSetInternal(liveSet, context: context)
+        // Get bookmark data on MainActor BEFORE entering background task
+        guard let bookmarkData = bookmarks[projectPath] else {
+            print("No bookmark found for project: \(projectPath)")
+            return
+        }
+
+        print("Starting parallel parsing of \(liveSetPaths.count) LiveSets...")
+        let startTime = Date()
+
+        // Launch a Task (inherits MainActor but immediately goes to background via @concurrent)
+        Task {
+            // Resolve bookmark ONCE for all files
+            var isStale = false
+            guard let folderUrl = try? URL(
+                resolvingBookmarkData: bookmarkData,
+                options: .withSecurityScope,
+                relativeTo: nil,
+                bookmarkDataIsStale: &isStale
+            ) else {
+                print("Failed to resolve bookmark for parsing")
+                return
             }
-        }
 
-        // After all LiveSets are parsed, link tracks to subprojects
-        for liveSet in liveSets where liveSet.category == .main {
-            linkTracksToSubprojects(liveSet: liveSet, context: context)
-        }
+            guard folderUrl.startAccessingSecurityScopedResource() else {
+                print("Failed to access security-scoped resource")
+                return
+            }
+            defer { folderUrl.stopAccessingSecurityScopedResource() }
 
-        do {
-            try context.save()
-            print("Finished parsing all LiveSets")
-        } catch {
-            print("Failed to save after parsing: \(error)")
+            // Parse files in parallel, write to SwiftData in batches
+            var completedCount = 0
+            var pendingSaveCount = 0
+            let batchSize = 20  // Save every 20 files to reduce UI updates
+
+            await withTaskGroup(of: AlsParseResult.self) { group in
+                for path in liveSetPaths {
+                    group.addTask {
+                        await parseAlsFileInBackground(at: path)
+                    }
+                }
+
+                // Process each result as it completes
+                for await result in group {
+                    completedCount += 1
+
+                    // Skip failed parses
+                    guard result.errorMessage == nil else {
+                        print("[\(completedCount)/\(liveSetPaths.count)] Failed: \(URL(fileURLWithPath: result.path).lastPathComponent)")
+                        continue
+                    }
+
+                    // Write to SwiftData (but don't save yet)
+                    await MainActor.run {
+                        let pathToFind = result.path
+                        let predicate = #Predicate<SDLiveSet> { $0.path == pathToFind }
+                        let descriptor = FetchDescriptor<SDLiveSet>(predicate: predicate)
+
+                        guard let liveSet = try? context.fetch(descriptor).first else { return }
+                        guard !liveSet.isParsed else { return }
+
+                        // Delete existing tracks
+                        for track in liveSet.tracks {
+                            context.delete(track)
+                        }
+
+                        // Create SDTrack objects from parsed data
+                        liveSet.liveVersion = result.liveVersion ?? "Unknown"
+
+                        for parsedTrack in result.tracks {
+                            let track = SDTrack(
+                                trackId: parsedTrack.id,
+                                name: parsedTrack.name,
+                                type: SDTrackType(rawValue: parsedTrack.type.rawValue) ?? .audio,
+                                parentGroupId: parsedTrack.parentGroupId
+                            )
+                            track.sortIndex = parsedTrack.sortIndex
+                            track.color = parsedTrack.color
+                            track.isFrozen = parsedTrack.isFrozen
+                            track.trackDelay = parsedTrack.trackDelay
+                            track.isDelayInSamples = parsedTrack.isDelayInSamples
+
+                            if let routing = parsedTrack.audioInput {
+                                track.audioInput = SDTrack.RoutingInfo(target: routing.target, displayName: routing.displayName, channel: routing.channel)
+                            }
+                            if let routing = parsedTrack.audioOutput {
+                                track.audioOutput = SDTrack.RoutingInfo(target: routing.target, displayName: routing.displayName, channel: routing.channel)
+                            }
+                            if let routing = parsedTrack.midiInput {
+                                track.midiInput = SDTrack.RoutingInfo(target: routing.target, displayName: routing.displayName, channel: routing.channel)
+                            }
+                            if let routing = parsedTrack.midiOutput {
+                                track.midiOutput = SDTrack.RoutingInfo(target: routing.target, displayName: routing.displayName, channel: routing.channel)
+                            }
+
+                            track.liveSet = liveSet
+                            context.insert(track)
+                        }
+
+                        liveSet.isParsed = true
+                        liveSet.lastUpdated = Date()
+                        pendingSaveCount += 1
+
+                        // Batch save: only save every N files to reduce UI lag
+                        if pendingSaveCount >= batchSize {
+                            try? context.save()
+                            pendingSaveCount = 0
+                        }
+                    }
+                }
+
+                // Final save for any remaining unsaved items
+                await MainActor.run {
+                    if pendingSaveCount > 0 {
+                        try? context.save()
+                    }
+                }
+            }
+
+            print("Parsed \(completedCount)/\(liveSetPaths.count) files in \(Date().timeIntervalSince(startTime).formatted(.number.precision(.fractionLength(1))))s")
+
+            // Link tracks to subprojects (quick operation at the end)
+            await MainActor.run {
+                ProjectManager.shared.accessFile(at: projectPath) { _ in
+                    let projectPredicate = #Predicate<SDProject> { $0.path == projectPath }
+                    let projectDescriptor = FetchDescriptor<SDProject>(predicate: projectPredicate)
+
+                    guard let project = try? context.fetch(projectDescriptor).first else { return }
+
+                    for liveSet in project.liveSets where liveSet.category == .main {
+                        ProjectManager.shared.linkTracksToSubprojects(liveSet: liveSet, context: context)
+                    }
+
+                    do {
+                        try context.save()
+                        let totalTime = Date().timeIntervalSince(startTime)
+                        print("Finished background parsing all LiveSets in \(totalTime.formatted(.number.precision(.fractionLength(1))))s")
+                    } catch {
+                        print("Failed to save after linking subprojects: \(error)")
+                    }
+                }
+            }
         }
     }
 
@@ -371,6 +496,7 @@ final class ProjectManager {
                 type: SDTrackType(rawValue: parsedTrack.type.rawValue) ?? .audio,
                 parentGroupId: parsedTrack.parentGroupId
             )
+            track.sortIndex = parsedTrack.sortIndex
             track.color = parsedTrack.color
             track.isFrozen = parsedTrack.isFrozen
             track.trackDelay = parsedTrack.trackDelay
@@ -410,6 +536,7 @@ final class ProjectManager {
             context.insert(track)
         }
 
+        liveSet.isParsed = true
         liveSet.lastUpdated = Date()
         print("Parsed \(parsedTracks.count) tracks from \(liveSet.name) (Live \(liveSet.liveVersion))")
     }
@@ -639,6 +766,17 @@ final class ProjectManager {
 
                     if category == .subproject {
                         loadSubprojectMetadata(for: liveSet, folderUrl: folderUrl)
+                    } else if category == .version {
+                        // Link version to its parent LiveSet
+                        if let parentName = extractParentName(from: fileName) {
+                            // Find the parent LiveSet by matching the name
+                            for existingLiveSet in project.liveSets where existingLiveSet.category == .main {
+                                if existingLiveSet.name == parentName {
+                                    liveSet.parentLiveSetPath = existingLiveSet.path
+                                    break
+                                }
+                            }
+                        }
                     }
 
                     newLiveSets.append(liveSet)
