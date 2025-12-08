@@ -6,53 +6,29 @@
 //
 
 import SwiftUI
+import SwiftData
 import AppKit
 import UniformTypeIdentifiers
 
 struct ContentView: View {
-    @Bindable var appState = AppState.shared
+    @Environment(\.modelContext) private var modelContext
+    @Query private var projects: [SDProject]
     var oscServer = OSCServer.shared
 
     var body: some View {
         NavigationSplitView {
-            // Sidebar with project list
-            List(selection: $appState.selectedProject) {
-                if appState.projects.isEmpty {
-                    Text("No projects opened")
-                        .foregroundColor(.secondary)
-                        .padding()
-                } else {
-                    ForEach(appState.projects) { project in
-                        ProjectRow(project: project)
-                            .tag(project)
-                    }
-                }
-            }
-            .navigationSplitViewColumnWidth(min: 200, ideal: 250)
-            .toolbar {
-                ToolbarItem(placement: .status) {
-                    HStack {
-                        Circle()
-                            .fill(oscServer.isRunning ? .green : .red)
-                            .frame(width: 8, height: 8)
-                        Text(oscServer.isRunning ? "Listening" : "Offline")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-            }
+            ProjectListView()
         } content: {
-            // Middle column: Live Sets in selected project
-            if let project = appState.selectedProject {
-                LiveSetListView(project: project)
+            if let selectedPath = UIState.shared.selectedProjectPath,
+               let project = projects.first(where: { $0.path == selectedPath }) {
+                LiveSetListView(projectPath: project.path)
             } else {
                 Text("Select a project")
                     .foregroundColor(.secondary)
             }
         } detail: {
-            // Right column: Track structure of selected Live Set
-            if let liveSet = appState.selectedLiveSet {
-                LiveSetDetailView(liveSet: liveSet, project: appState.selectedProject)
+            if let selectedPath = UIState.shared.selectedLiveSetPath {
+                LiveSetDetailWrapper(liveSetPath: selectedPath)
             } else {
                 VStack(spacing: 16) {
                     Image(systemName: "music.note.list")
@@ -72,11 +48,67 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 900, minHeight: 500)
+        .onAppear {
+            // Inject model context to ProjectManager
+            ProjectManager.shared.modelContext = modelContext
+        }
+    }
+}
+
+// MARK: - Project List (Sidebar)
+
+struct ProjectListView: View {
+    @Environment(\.modelContext) private var modelContext
+    @Query(sort: \SDProject.lastUpdated, order: .reverse) private var projects: [SDProject]
+    var oscServer = OSCServer.shared
+
+    var body: some View {
+        List(selection: Binding(
+            get: { UIState.shared.selectedProjectPath },
+            set: { UIState.shared.selectedProjectPath = $0 }
+        )) {
+            if projects.isEmpty {
+                Text("No projects opened")
+                    .foregroundColor(.secondary)
+                    .padding()
+            } else {
+                ForEach(projects, id: \.path) { project in
+                    ProjectRow(project: project)
+                        .tag(project.path)
+                }
+            }
+        }
+        .navigationSplitViewColumnWidth(min: 200, ideal: 250)
+        .toolbar {
+            ToolbarItem(placement: .status) {
+                HStack {
+                    Circle()
+                        .fill(oscServer.isRunning ? .green : .red)
+                        .frame(width: 8, height: 8)
+                    Text(oscServer.isRunning ? "Listening" : "Offline")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
     }
 }
 
 struct ProjectRow: View {
-    var project: Project
+    @Environment(\.modelContext) private var modelContext
+    var project: SDProject
+
+    private var mainCount: Int {
+        let predicate = SDPredicates.mainLiveSets(forProjectPath: project.path)
+        let descriptor = FetchDescriptor<SDLiveSet>(predicate: predicate)
+        return (try? modelContext.fetchCount(descriptor)) ?? 0
+    }
+
+    private var subprojectCount: Int {
+        let predicate = SDPredicates.subprojectLiveSets(forProjectPath: project.path)
+        let descriptor = FetchDescriptor<SDLiveSet>(predicate: predicate)
+        return (try? modelContext.fetchCount(descriptor)) ?? 0
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -86,7 +118,7 @@ struct ProjectRow: View {
                 Text(project.name)
                     .fontWeight(.medium)
             }
-            Text("\(project.mainLiveSets.count) set(s), \(project.subprojectLiveSets.count) subproject(s)")
+            Text("\(mainCount) set(s), \(subprojectCount) subproject(s)")
                 .font(.caption)
                 .foregroundColor(.secondary)
         }
@@ -94,108 +126,191 @@ struct ProjectRow: View {
     }
 }
 
+// MARK: - LiveSet List (Middle Column)
+
 struct LiveSetListView: View {
-    var project: Project
-    @Bindable var appState = AppState.shared
-    @State private var expandedLiveSets: Set<String> = []
+    let projectPath: String
 
-    private var sortedMainLiveSets: [LiveSet] {
-        let liveSets = project.mainLiveSets
-        if appState.liveSetSortOrder == .descending {
-            return liveSets.reversed()
+    var body: some View {
+        List(selection: Binding(
+            get: { UIState.shared.selectedLiveSetPath },
+            set: { UIState.shared.selectedLiveSetPath = $0 }
+        )) {
+            // Main Live Sets with dynamic sort
+            MainLiveSetsSection(projectPath: projectPath, sortAscending: UIState.shared.liveSetSortOrder == .ascending)
+
+            // Subprojects
+            SubprojectLiveSetsSection(projectPath: projectPath)
+
+            // Backups
+            BackupLiveSetsSection(projectPath: projectPath)
         }
-        return liveSets
+        .navigationSplitViewColumnWidth(min: 200, ideal: 280)
     }
+}
 
-    private func toggleExpanded(_ liveSet: LiveSet) {
-        if expandedLiveSets.contains(liveSet.id) {
-            expandedLiveSets.remove(liveSet.id)
-        } else {
-            expandedLiveSets.insert(liveSet.id)
+/// Subview for main LiveSets with dynamic sort order via init
+struct MainLiveSetsSection: View {
+    @Query private var liveSets: [SDLiveSet]
+    let projectPath: String
+
+    init(projectPath: String, sortAscending: Bool) {
+        self.projectPath = projectPath
+        let mainCategory = SDLiveSetCategory.main.rawValue
+        let predicate = #Predicate<SDLiveSet> { liveSet in
+            liveSet.project?.path == projectPath && liveSet.categoryRaw == mainCategory
         }
+        _liveSets = Query(
+            filter: predicate,
+            sort: [SortDescriptor(\SDLiveSet.path, order: sortAscending ? .forward : .reverse)]
+        )
     }
 
     var body: some View {
-        List(selection: $appState.selectedLiveSet) {
-            // Main Live Sets
-            if !project.mainLiveSets.isEmpty {
-                Section {
-                    ForEach(sortedMainLiveSets) { liveSet in
-                        LiveSetRow(liveSet: liveSet, project: project, isExpanded: expandedLiveSets.contains(liveSet.id)) {
-                            toggleExpanded(liveSet)
-                        }
-                        .tag(liveSet)
-
-                        // Show versions as separate list items when expanded
-                        if expandedLiveSets.contains(liveSet.id) {
-                            ForEach(liveSet.versions) { version in
-                                VersionRow(version: version)
-                                    .tag(version)
-                            }
-                        }
-                    }
-                } header: {
-                    HStack {
-                        Text("Live Sets")
-                        Spacer()
-                        Button {
-                            appState.liveSetSortOrder = appState.liveSetSortOrder == .ascending ? .descending : .ascending
-                        } label: {
-                            Image(systemName: appState.liveSetSortOrder == .ascending ? "arrow.up" : "arrow.down")
-                                .font(.caption)
-                        }
-                        .buttonStyle(.plain)
-                        .help(appState.liveSetSortOrder == .ascending ? "Sort Z-A" : "Sort A-Z")
-                    }
+        if !liveSets.isEmpty {
+            Section {
+                ForEach(liveSets, id: \.path) { liveSet in
+                    LiveSetRowWithVersions(liveSet: liveSet)
+                        .tag(liveSet.path)
                 }
-            }
-
-            // Subprojects
-            if !project.subprojectLiveSets.isEmpty {
-                Section("Subprojects") {
-                    ForEach(project.subprojectLiveSets) { liveSet in
-                        LiveSetRow(liveSet: liveSet, project: project, isExpanded: false, onToggleExpand: {})
-                            .tag(liveSet)
+            } header: {
+                HStack {
+                    Text("Live Sets")
+                    Spacer()
+                    Button {
+                        UIState.shared.liveSetSortOrder = UIState.shared.liveSetSortOrder == .ascending ? .descending : .ascending
+                    } label: {
+                        Image(systemName: UIState.shared.liveSetSortOrder == .ascending ? "arrow.up" : "arrow.down")
+                            .font(.caption)
                     }
+                    .buttonStyle(.plain)
+                    .help(UIState.shared.liveSetSortOrder == .ascending ? "Sort Z-A" : "Sort A-Z")
                 }
-            }
-
-            // Backups (collapsed by default)
-            if !project.backupLiveSets.isEmpty {
-                Section("Backups (\(project.backupLiveSets.count))") {
-                    ForEach(project.backupLiveSets) { liveSet in
-                        LiveSetRow(liveSet: liveSet, project: project, isExpanded: false, onToggleExpand: {})
-                            .tag(liveSet)
-                    }
-                }
-            }
-        }
-        .navigationSplitViewColumnWidth(min: 200, ideal: 280)
-        .onChange(of: appState.selectedLiveSet) { _, newValue in
-            if let liveSet = newValue, liveSet.tracks.isEmpty {
-                ProjectManager.shared.parseLiveSet(liveSet)
             }
         }
     }
 }
 
+/// Subview for subproject LiveSets
+struct SubprojectLiveSetsSection: View {
+    @Query private var liveSets: [SDLiveSet]
+
+    init(projectPath: String) {
+        let subprojectCategory = SDLiveSetCategory.subproject.rawValue
+        let predicate = #Predicate<SDLiveSet> { liveSet in
+            liveSet.project?.path == projectPath && liveSet.categoryRaw == subprojectCategory
+        }
+        _liveSets = Query(filter: predicate, sort: [SortDescriptor(\SDLiveSet.path)])
+    }
+
+    var body: some View {
+        if !liveSets.isEmpty {
+            Section("Subprojects") {
+                ForEach(liveSets, id: \.path) { liveSet in
+                    LiveSetRow(liveSet: liveSet)
+                        .tag(liveSet.path)
+                }
+            }
+        }
+    }
+}
+
+/// Subview for backup LiveSets sorted by timestamp
+struct BackupLiveSetsSection: View {
+    @Environment(\.modelContext) private var modelContext
+    @Query private var liveSets: [SDLiveSet]
+
+    init(projectPath: String) {
+        let backupCategory = SDLiveSetCategory.backup.rawValue
+        let predicate = #Predicate<SDLiveSet> { liveSet in
+            liveSet.project?.path == projectPath && liveSet.categoryRaw == backupCategory
+        }
+        _liveSets = Query(
+            filter: predicate,
+            sort: [SortDescriptor(\SDLiveSet.backupTimestamp, order: .reverse)]
+        )
+    }
+
+    var body: some View {
+        if !liveSets.isEmpty {
+            Section("Backups (\(liveSets.count))") {
+                ForEach(liveSets, id: \.path) { liveSet in
+                    LiveSetRow(liveSet: liveSet)
+                        .tag(liveSet.path)
+                }
+            }
+        }
+    }
+}
+
+/// LiveSet row with expandable versions
+struct LiveSetRowWithVersions: View {
+    let liveSet: SDLiveSet
+    @State private var isExpanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            LiveSetRow(liveSet: liveSet, isExpandable: true, isExpanded: isExpanded) {
+                isExpanded.toggle()
+            }
+
+            if isExpanded {
+                VersionsSubview(parentPath: liveSet.path)
+            }
+        }
+    }
+}
+
+/// Subview for version LiveSets of a parent
+struct VersionsSubview: View {
+    @Query private var versions: [SDLiveSet]
+
+    init(parentPath: String) {
+        let versionCategory = SDLiveSetCategory.version.rawValue
+        let predicate = #Predicate<SDLiveSet> { liveSet in
+            liveSet.categoryRaw == versionCategory && liveSet.parentLiveSetPath == parentPath
+        }
+        _versions = Query(filter: predicate, sort: [SortDescriptor(\SDLiveSet.path, order: .reverse)])
+    }
+
+    var body: some View {
+        ForEach(versions, id: \.path) { version in
+            VersionRow(version: version)
+                .tag(version.path)
+        }
+    }
+}
+
+// MARK: - Row Views
+
 struct LiveSetRow: View {
-    var liveSet: LiveSet
-    var project: Project?
-    var isExpanded: Bool
-    var onToggleExpand: () -> Void
+    let liveSet: SDLiveSet
+    var isExpandable: Bool = false
+    var isExpanded: Bool = false
+    var onToggleExpand: (() -> Void)? = nil
+    @Environment(\.modelContext) private var modelContext
     @State private var showVersionDialog = false
     @State private var versionComment = ""
+
+    private var versionCount: Int {
+        let versionCategory = SDLiveSetCategory.version.rawValue
+        let parentPath = liveSet.path
+        let predicate = #Predicate<SDLiveSet> { ls in
+            ls.categoryRaw == versionCategory && ls.parentLiveSetPath == parentPath
+        }
+        let descriptor = FetchDescriptor<SDLiveSet>(predicate: predicate)
+        return (try? modelContext.fetchCount(descriptor)) ?? 0
+    }
 
     var body: some View {
         HStack {
             // Expand/collapse chevron for main LiveSets with versions
-            if liveSet.category == .main && !liveSet.versions.isEmpty {
+            if isExpandable && versionCount > 0 {
                 Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                     .foregroundColor(.secondary)
                     .frame(width: 12)
                     .onTapGesture {
-                        onToggleExpand()
+                        onToggleExpand?()
                     }
             } else if liveSet.category == .main {
                 Rectangle()
@@ -211,16 +326,16 @@ struct LiveSetRow: View {
                     .lineLimit(1)
 
                 // Show source info for subprojects with metadata
-                if liveSet.category == .subproject, let metadata = liveSet.metadata {
-                    Text("From: \(metadata.sourceLiveSetName) → \(metadata.sourceGroupName)")
+                if liveSet.category == .subproject, liveSet.hasMetadata {
+                    Text("From: \(liveSet.sourceLiveSetName ?? "") → \(liveSet.sourceGroupName ?? "")")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                         .lineLimit(1)
                 }
             }
 
-            if liveSet.category == .main && !liveSet.versions.isEmpty {
-                Text("(\(liveSet.versions.count))")
+            if isExpandable && versionCount > 0 {
+                Text("(\(versionCount))")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -251,8 +366,7 @@ struct LiveSetRow: View {
     }
 
     private func createVersion(comment: String?) {
-        guard let project = project else { return }
-        ProjectManager.shared.createVersion(of: liveSet, in: project, comment: comment)
+        ProjectManager.shared.createVersion(of: liveSet, comment: comment)
     }
 
     private func openInAbleton() {
@@ -260,7 +374,7 @@ struct LiveSetRow: View {
         NSWorkspace.shared.open(url)
     }
 
-    private func iconForCategory(_ category: LiveSetCategory) -> String {
+    private func iconForCategory(_ category: SDLiveSetCategory) -> String {
         switch category {
         case .main: return "doc.fill"
         case .subproject: return "doc.badge.gearshape.fill"
@@ -269,7 +383,7 @@ struct LiveSetRow: View {
         }
     }
 
-    private func colorForCategory(_ category: LiveSetCategory) -> Color {
+    private func colorForCategory(_ category: SDLiveSetCategory) -> Color {
         switch category {
         case .main: return .blue
         case .subproject: return .purple
@@ -280,7 +394,7 @@ struct LiveSetRow: View {
 }
 
 struct VersionRow: View {
-    var version: LiveSet
+    let version: SDLiveSet
 
     var body: some View {
         HStack(alignment: .top) {
@@ -310,8 +424,6 @@ struct VersionRow: View {
     }
 
     private func formatVersionName(_ name: String) -> String {
-        // Extract timestamp from .version-{parentName}-{timestamp}
-        // Format: 2025-12-08T14-30-00Z -> "2025-12-08 14:30"
         if let range = name.range(of: #"\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}"#, options: .regularExpression) {
             var timestamp = String(name[range])
             timestamp = timestamp.replacingOccurrences(of: "T", with: " ")
@@ -329,57 +441,41 @@ struct VersionRow: View {
     }
 }
 
+// MARK: - LiveSet Detail View
+
+/// Wrapper to fetch LiveSet by path
+struct LiveSetDetailWrapper: View {
+    @Query private var liveSets: [SDLiveSet]
+
+    init(liveSetPath: String) {
+        let predicate = #Predicate<SDLiveSet> { $0.path == liveSetPath }
+        _liveSets = Query(filter: predicate)
+    }
+
+    var body: some View {
+        if let liveSet = liveSets.first {
+            LiveSetDetailView(liveSet: liveSet)
+        } else {
+            Text("LiveSet not found")
+                .foregroundColor(.secondary)
+        }
+    }
+}
+
 struct LiveSetDetailView: View {
-    var liveSet: LiveSet
-    var project: Project?
-    @Bindable var appState = AppState.shared
+    let liveSet: SDLiveSet
 
     private var isInspectorPresented: Binding<Bool> {
         Binding(
-            get: { appState.isInspectorVisible },
-            set: { newValue in
-                // Sync inspector visibility with drag state
-                appState.isInspectorVisible = newValue
-            }
+            get: { UIState.shared.isInspectorVisible },
+            set: { UIState.shared.isInspectorVisible = $0 }
         )
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Header
-            HStack {
-                VStack(alignment: .leading) {
-                    Text(liveSet.name)
-                        .font(.title)
-                        .fontWeight(.bold)
-                    Text(liveSet.path)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    // Show source info for subprojects
-                    if liveSet.category == .subproject, let metadata = liveSet.metadata {
-                        HStack(spacing: 4) {
-                            Image(systemName: "link")
-                                .font(.caption)
-                            Text("From \(metadata.sourceLiveSetName) → \(metadata.sourceGroupName) (ID: \(metadata.sourceGroupId))")
-                                .font(.caption)
-                        }
-                        .foregroundColor(.purple)
-                    }
-                }
-                Spacer()
-                VStack(alignment: .trailing) {
-                    Text("Ableton Live \(liveSet.liveVersion)")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    Text("\(liveSet.groups.count) groups")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-            }
-            .padding()
-            .background(Color(nsColor: .controlBackgroundColor))
+            LiveSetHeader(liveSet: liveSet)
 
             Divider()
 
@@ -395,25 +491,12 @@ struct LiveSetDetailView: View {
                 }
                 .frame(maxWidth: .infinity)
             } else {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(liveSet.rootTracks) { track in
-                            TrackRow(track: track, depth: 0, liveSet: liveSet, project: project)
-                        }
-                    }
-                    .padding()
-                }
+                TrackListView(liveSetPath: liveSet.path)
             }
         }
         .inspector(isPresented: isInspectorPresented) {
-            Group {
-                if let selectedTrack = appState.selectedTrack {
-                    TrackInspectorView(track: selectedTrack, project: project)
-                } else {
-                    LiveSetInspectorView(liveSet: liveSet, project: project)
-                }
-            }
-            .inspectorColumnWidth(min: 250, ideal: 300, max: 400)
+            InspectorContent(liveSet: liveSet)
+                .inspectorColumnWidth(min: 250, ideal: 300, max: 400)
         }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
@@ -426,35 +509,134 @@ struct LiveSetDetailView: View {
             }
             ToolbarItem(placement: .primaryAction) {
                 Button {
-                    appState.isInspectorVisible.toggle()
+                    UIState.shared.isInspectorVisible.toggle()
                 } label: {
-                    Image(systemName: appState.isInspectorVisible ? "info.circle.fill" : "info.circle")
+                    Image(systemName: UIState.shared.isInspectorVisible ? "info.circle.fill" : "info.circle")
                 }
-                .help(appState.isInspectorVisible ? "Hide Inspector" : "Show Inspector")
+                .help(UIState.shared.isInspectorVisible ? "Hide Inspector" : "Show Inspector")
             }
         }
-        .onChange(of: liveSet.id) { _, _ in
-            // Clear track selection when changing LiveSet
-            appState.selectedTrack = nil
+        .onChange(of: liveSet.path) { _, _ in
+            UIState.shared.selectedTrackId = nil
         }
     }
 }
 
-struct TrackRow: View {
-    let track: Track
+struct LiveSetHeader: View {
+    @Environment(\.modelContext) private var modelContext
+    let liveSet: SDLiveSet
+
+    private var groupCount: Int {
+        let groupType = SDTrackType.group.rawValue
+        let liveSetPath = liveSet.path
+        let predicate = #Predicate<SDTrack> { track in
+            track.liveSet?.path == liveSetPath && track.typeRaw == groupType
+        }
+        let descriptor = FetchDescriptor<SDTrack>(predicate: predicate)
+        return (try? modelContext.fetchCount(descriptor)) ?? 0
+    }
+
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading) {
+                Text(liveSet.name)
+                    .font(.title)
+                    .fontWeight(.bold)
+                Text(liveSet.path)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if liveSet.category == .subproject, liveSet.hasMetadata {
+                    HStack(spacing: 4) {
+                        Image(systemName: "link")
+                            .font(.caption)
+                        Text("From \(liveSet.sourceLiveSetName ?? "") → \(liveSet.sourceGroupName ?? "") (ID: \(liveSet.sourceGroupId ?? 0))")
+                            .font(.caption)
+                    }
+                    .foregroundColor(.purple)
+                }
+            }
+            Spacer()
+            VStack(alignment: .trailing) {
+                Text("Ableton Live \(liveSet.liveVersion)")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Text("\(groupCount) groups")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding()
+        .background(Color(nsColor: .controlBackgroundColor))
+    }
+}
+
+struct InspectorContent: View {
+    let liveSet: SDLiveSet
+    @Query private var tracks: [SDTrack]
+
+    init(liveSet: SDLiveSet) {
+        self.liveSet = liveSet
+        let selectedId = UIState.shared.selectedTrackId
+        let liveSetPath = liveSet.path
+        if let trackId = selectedId {
+            let predicate = #Predicate<SDTrack> { track in
+                track.liveSet?.path == liveSetPath && track.trackId == trackId
+            }
+            _tracks = Query(filter: predicate)
+        } else {
+            // No track selected - empty query
+            let predicate = #Predicate<SDTrack> { _ in false }
+            _tracks = Query(filter: predicate)
+        }
+    }
+
+    var body: some View {
+        if let selectedTrack = tracks.first {
+            SDTrackInspectorView(track: selectedTrack)
+        } else {
+            SDLiveSetInspectorView(liveSet: liveSet)
+        }
+    }
+}
+
+// MARK: - Track List View
+
+struct TrackListView: View {
+    @Query private var rootTracks: [SDTrack]
+
+    init(liveSetPath: String) {
+        let predicate = #Predicate<SDTrack> { track in
+            track.liveSet?.path == liveSetPath && track.parentGroupId == nil
+        }
+        _rootTracks = Query(filter: predicate, sort: [SortDescriptor(\SDTrack.trackId)])
+    }
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                ForEach(rootTracks, id: \.trackId) { track in
+                    SDTrackRow(track: track, depth: 0)
+                }
+            }
+            .padding()
+        }
+    }
+}
+
+struct SDTrackRow: View {
+    let track: SDTrack
     let depth: Int
-    let liveSet: LiveSet
-    let project: Project?
     @State private var isExpanded = false
     @State private var isExtracting = false
     @State private var extractionError: String?
     @State private var showError = false
     @State private var showOpenPrompt = false
     @State private var extractedPath: String?
-    @Bindable var appState = AppState.shared
 
     private var isSelected: Bool {
-        appState.selectedTrack?.id == track.id
+        UIState.shared.selectedTrackId == track.trackId
     }
 
     var body: some View {
@@ -499,7 +681,7 @@ struct TrackRow: View {
                         .padding(.horizontal, 4)
                 }
 
-                // Subproject indicator (clickable to navigate)
+                // Subproject indicator
                 if let subprojectPath = track.subprojectPath {
                     Button {
                         navigateToSubproject(path: subprojectPath)
@@ -538,15 +720,14 @@ struct TrackRow: View {
             .cornerRadius(4)
             .contentShape(Rectangle())
             .onTapGesture {
-                // Select the track to show inspector
-                appState.selectedTrack = track
+                UIState.shared.selectedTrackId = track.trackId
             }
             .contextMenu {
                 if track.isGroup {
                     Button("Extract as Subproject") {
                         extractAsSubproject()
                     }
-                    .disabled(isExtracting || project == nil)
+                    .disabled(isExtracting || track.liveSet?.project == nil)
                 }
             }
             .alert("Extraction Error", isPresented: $showError) {
@@ -567,27 +748,20 @@ struct TrackRow: View {
 
             // Children (if expanded)
             if track.isGroup && isExpanded {
-                ForEach(track.children) { child in
-                    TrackRow(track: child, depth: depth + 1, liveSet: liveSet, project: project)
-                }
+                ChildTracksView(liveSetPath: track.liveSet?.path ?? "", parentGroupId: track.trackId, depth: depth + 1)
             }
         }
     }
 
     private func navigateToSubproject(path: String) {
-        guard let project = project else { return }
-
-        // Find the subproject LiveSet by path
-        if let subproject = project.subprojectLiveSets.first(where: { $0.path == path }) {
-            AppState.shared.selectedLiveSet = subproject
-            AppState.shared.selectedTrack = nil
-        }
+        UIState.shared.selectedLiveSetPath = path
+        UIState.shared.selectedTrackId = nil
     }
 
     private func extractAsSubproject() {
-        guard let project = project else { return }
+        guard let liveSet = track.liveSet,
+              let project = liveSet.project else { return }
 
-        // Generate filename
         let safeName = track.name.replacingOccurrences(of: "/", with: "-")
         let timestamp = ISO8601DateFormatter().string(from: Date())
             .replacingOccurrences(of: ":", with: "-")
@@ -596,14 +770,13 @@ struct TrackRow: View {
 
         isExtracting = true
 
-        // Use ProjectManager to extract with proper folder access
         ProjectManager.shared.extractSubproject(
             from: liveSet.path,
-            groupId: track.id,
+            groupId: track.trackId,
             groupName: track.name,
             sourceLiveSetName: liveSet.name,
             to: outputPath,
-            project: project
+            projectPath: project.path
         ) { result in
             DispatchQueue.main.async {
                 isExtracting = false
@@ -612,9 +785,7 @@ struct TrackRow: View {
                     print("Extracted subproject to: \(path)")
                     extractedPath = path
                     showOpenPrompt = true
-
-                    // Rescan project folder to show new subproject
-                    ProjectManager.shared.rescanProject(project)
+                    ProjectManager.shared.rescanProject(projectPath: project.path)
                 } else {
                     extractionError = "Failed to extract subproject"
                     showError = true
@@ -628,7 +799,7 @@ struct TrackRow: View {
         NSWorkspace.shared.open(url)
     }
 
-    private func iconForTrackType(_ type: Track.TrackType) -> String {
+    private func iconForTrackType(_ type: SDTrackType) -> String {
         switch type {
         case .audio: return "waveform"
         case .midi: return "pianokeys"
@@ -637,12 +808,32 @@ struct TrackRow: View {
         }
     }
 
-    private func colorForTrackType(_ type: Track.TrackType) -> Color {
+    private func colorForTrackType(_ type: SDTrackType) -> Color {
         switch type {
         case .audio: return .orange
         case .midi: return .purple
         case .group: return .blue
         case .returnTrack: return .green
+        }
+    }
+}
+
+/// Subview to fetch child tracks with predicate
+struct ChildTracksView: View {
+    @Query private var children: [SDTrack]
+    let depth: Int
+
+    init(liveSetPath: String, parentGroupId: Int, depth: Int) {
+        self.depth = depth
+        let predicate = #Predicate<SDTrack> { track in
+            track.liveSet?.path == liveSetPath && track.parentGroupId == parentGroupId
+        }
+        _children = Query(filter: predicate, sort: [SortDescriptor(\SDTrack.trackId)])
+    }
+
+    var body: some View {
+        ForEach(children, id: \.trackId) { child in
+            SDTrackRow(track: child, depth: depth)
         }
     }
 }

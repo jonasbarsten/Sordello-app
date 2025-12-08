@@ -6,11 +6,55 @@
 //
 
 import SwiftUI
+import SwiftData
 import AppKit
 import UniformTypeIdentifiers
 
 @main
 struct SordelloApp: App {
+    let modelContainer: ModelContainer
+
+    init() {
+        // Delete existing database files BEFORE creating container (fresh start each launch)
+        Self.deleteSwiftDataFiles()
+
+        do {
+            let schema = Schema([
+                SDProject.self,
+                SDLiveSet.self,
+                SDTrack.self,
+                SDConnectedDevice.self
+            ])
+            let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
+            modelContainer = try ModelContainer(for: schema, configurations: [modelConfiguration])
+            print("Created fresh ModelContainer")
+        } catch {
+            fatalError("Failed to create ModelContainer: \(error)")
+        }
+    }
+
+    /// Delete SwiftData database files before container creation
+    private static func deleteSwiftDataFiles() {
+        let fileManager = FileManager.default
+        guard let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return
+        }
+
+        // SwiftData stores files with .store extension
+        let storeFiles = ["default.store", "default.store-shm", "default.store-wal"]
+        for fileName in storeFiles {
+            let fileUrl = appSupport.appendingPathComponent(fileName)
+            if fileManager.fileExists(atPath: fileUrl.path) {
+                do {
+                    try fileManager.removeItem(at: fileUrl)
+                } catch {
+                    print("Failed to delete \(fileName): \(error)")
+                }
+            }
+        }
+        print("Cleared SwiftData on launch")
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()
@@ -18,6 +62,7 @@ struct SordelloApp: App {
                     OSCServer.shared.start()
                 }
         }
+        .modelContainer(modelContainer)
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("Open Project...") {
@@ -30,16 +75,18 @@ struct SordelloApp: App {
 }
 
 /// Manages project opening and file access
-@Observable
-class ProjectManager {
+/// Now writes to SwiftData instead of in-memory state
+@MainActor
+final class ProjectManager {
     static let shared = ProjectManager()
 
     /// Store security-scoped bookmarks for file access
     private var bookmarks: [String: Data] = [:]
-    /// Store bookmarks for directories (for write access)
-    private var directoryBookmarks: [String: Data] = [:]
 
-    init() {}
+    /// Reference to the model context (set from views)
+    var modelContext: ModelContext?
+
+    private init() {}
 
     /// Open a project folder using NSOpenPanel
     func openProject() {
@@ -136,33 +183,33 @@ class ProjectManager {
         }
     }
 
-    /// Load a project folder and scan for .als files
+    /// Load a project folder and scan for .als files - writes to SwiftData
     func loadProject(at folderUrl: URL) {
-        // Start accessing for initial load
-        let accessing = folderUrl.startAccessingSecurityScopedResource()
-
-        // Scan for .als files in the folder
-        let liveSets = scanForLiveSets(in: folderUrl)
-
-        if liveSets.isEmpty {
-            print("No .als files found in: \(folderUrl.path)")
-            if accessing { folderUrl.stopAccessingSecurityScopedResource() }
+        guard let context = modelContext else {
+            print("No ModelContext available")
             return
         }
 
-        print("Found \(liveSets.count) Live Set(s) in project folder")
+        // Start accessing for initial load
+        let accessing = folderUrl.startAccessingSecurityScopedResource()
 
-        // Create/update the project in app state
-        let project = AppState.shared.getOrCreateProject(folderPath: folderUrl.path)
-        project.liveSets = liveSets
-        project.lastUpdated = Date()
+        // Fix any _subproject files first
+        fixSubprojectFilenames(in: folderUrl)
 
-        // Select the newly opened project
-        AppState.shared.selectedProject = project
+        // Get or create the project in SwiftData
+        let project = getOrCreateProject(path: folderUrl.path, context: context)
 
-        // Auto-select the first main Live Set if available
-        if let firstMain = project.mainLiveSets.first {
-            AppState.shared.selectedLiveSet = firstMain
+        // Scan and save LiveSets
+        scanAndSaveLiveSets(in: folderUrl, for: project, context: context)
+
+        // Select the project in UI state
+        UIState.shared.selectedProjectPath = project.path
+
+        // Auto-select the first main LiveSet
+        let mainPredicate = SDPredicates.mainLiveSets(forProjectPath: project.path)
+        let descriptor = FetchDescriptor<SDLiveSet>(predicate: mainPredicate, sortBy: [SDSortDescriptors.liveSetsByName()])
+        if let firstMain = try? context.fetch(descriptor).first {
+            UIState.shared.selectedLiveSetPath = firstMain.path
         }
 
         if accessing { folderUrl.stopAccessingSecurityScopedResource() }
@@ -174,6 +221,224 @@ class ProjectManager {
                 self?.reloadProject(folderPath: folderUrl.path)
             }
         }
+    }
+
+    /// Get or create a project in SwiftData
+    private func getOrCreateProject(path: String, context: ModelContext) -> SDProject {
+        let predicate = #Predicate<SDProject> { $0.path == path }
+        let descriptor = FetchDescriptor<SDProject>(predicate: predicate)
+
+        if let existing = try? context.fetch(descriptor).first {
+            return existing
+        }
+
+        let project = SDProject(path: path)
+        context.insert(project)
+        return project
+    }
+
+    /// Scan folder and save LiveSets to SwiftData
+    private func scanAndSaveLiveSets(in folderUrl: URL, for project: SDProject, context: ModelContext) {
+        let fileManager = FileManager.default
+
+        // Delete existing LiveSets and tracks for this project
+        let existingLiveSets = project.liveSets
+        for liveSet in existingLiveSets {
+            context.delete(liveSet)
+        }
+
+        var mainLiveSetPaths: [String: SDLiveSet] = [:]
+
+        // Scan root folder for .als files
+        if let rootContents = try? fileManager.contentsOfDirectory(at: folderUrl, includingPropertiesForKeys: nil) {
+            for fileUrl in rootContents where fileUrl.pathExtension.lowercased() == "als" {
+                let fileName = fileUrl.lastPathComponent
+
+                if fileName.hasPrefix(".subproject-") {
+                    let liveSet = SDLiveSet(path: fileUrl.path, category: .subproject)
+                    loadSubprojectMetadata(for: liveSet, folderUrl: folderUrl)
+                    liveSet.comment = loadComment(for: fileUrl)
+                    liveSet.fileModificationDate = getFileModificationDate(for: fileUrl)
+                    liveSet.project = project
+                    context.insert(liveSet)
+
+                } else if fileName.hasPrefix(".version-") {
+                    // Version files are handled after main LiveSets
+                    continue
+
+                } else {
+                    let liveSet = SDLiveSet(path: fileUrl.path, category: .main)
+                    liveSet.comment = loadComment(for: fileUrl)
+                    liveSet.fileModificationDate = getFileModificationDate(for: fileUrl)
+                    liveSet.project = project
+                    context.insert(liveSet)
+                    mainLiveSetPaths[liveSet.name] = liveSet
+                }
+            }
+        }
+
+        // Scan for version files and link them to parents
+        if let rootContents = try? fileManager.contentsOfDirectory(at: folderUrl, includingPropertiesForKeys: nil) {
+            for fileUrl in rootContents where fileUrl.pathExtension.lowercased() == "als" {
+                let fileName = fileUrl.lastPathComponent
+
+                if fileName.hasPrefix(".version-"),
+                   let parentName = extractParentName(from: fileName),
+                   let parentLiveSet = mainLiveSetPaths[parentName] {
+                    let liveSet = SDLiveSet(path: fileUrl.path, category: .version)
+                    liveSet.parentLiveSetPath = parentLiveSet.path
+                    liveSet.comment = loadComment(for: fileUrl)
+                    liveSet.fileModificationDate = getFileModificationDate(for: fileUrl)
+                    liveSet.project = project
+                    context.insert(liveSet)
+                }
+            }
+        }
+
+        // Scan Backup folder
+        let backupUrl = folderUrl.appendingPathComponent("Backup")
+        if let backupContents = try? fileManager.contentsOfDirectory(at: backupUrl, includingPropertiesForKeys: nil) {
+            for fileUrl in backupContents where fileUrl.pathExtension.lowercased() == "als" {
+                let liveSet = SDLiveSet(path: fileUrl.path, category: .backup)
+                liveSet.comment = loadComment(for: fileUrl)
+                liveSet.fileModificationDate = getFileModificationDate(for: fileUrl)
+                liveSet.project = project
+                context.insert(liveSet)
+            }
+        }
+
+        project.lastUpdated = Date()
+
+        do {
+            try context.save()
+            print("Saved project with LiveSets to SwiftData")
+        } catch {
+            print("Failed to save to SwiftData: \(error)")
+        }
+
+        // Parse all LiveSets upfront (we're already in security-scoped access)
+        parseAllLiveSets(for: project, context: context)
+    }
+
+    /// Parse all LiveSets in a project and save tracks to SwiftData
+    private func parseAllLiveSets(for project: SDProject, context: ModelContext) {
+        let liveSets = project.liveSets
+        print("Parsing \(liveSets.count) LiveSets...")
+
+        for liveSet in liveSets {
+            // Wrap in autoreleasepool to free memory after each file is parsed
+            autoreleasepool {
+                parseLiveSetInternal(liveSet, context: context)
+            }
+        }
+
+        // After all LiveSets are parsed, link tracks to subprojects
+        for liveSet in liveSets where liveSet.category == .main {
+            linkTracksToSubprojects(liveSet: liveSet, context: context)
+        }
+
+        do {
+            try context.save()
+            print("Finished parsing all LiveSets")
+        } catch {
+            print("Failed to save after parsing: \(error)")
+        }
+    }
+
+    /// Internal parsing method - used when already in security-scoped access
+    private func parseLiveSetInternal(_ liveSet: SDLiveSet, context: ModelContext) {
+        let alsUrl = URL(fileURLWithPath: liveSet.path)
+
+        let parser = AlsParser()
+        guard parser.loadFile(at: alsUrl) else {
+            print("Failed to parse Live Set \(liveSet.name): \(parser.errorMessage ?? "unknown error")")
+            return
+        }
+
+        // Delete existing tracks for this LiveSet
+        for track in liveSet.tracks {
+            context.delete(track)
+        }
+
+        // Parse and save tracks
+        let parsedTracks = parser.getTracks()
+        liveSet.liveVersion = parser.liveVersion ?? "Unknown"
+
+        for parsedTrack in parsedTracks {
+            let track = SDTrack(
+                trackId: parsedTrack.id,
+                name: parsedTrack.name,
+                type: SDTrackType(rawValue: parsedTrack.type.rawValue) ?? .audio,
+                parentGroupId: parsedTrack.parentGroupId
+            )
+            track.color = parsedTrack.color
+            track.isFrozen = parsedTrack.isFrozen
+            track.trackDelay = parsedTrack.trackDelay
+            track.isDelayInSamples = parsedTrack.isDelayInSamples
+
+            // Convert routing info
+            if let routing = parsedTrack.audioInput {
+                track.audioInput = SDTrack.RoutingInfo(
+                    target: routing.target,
+                    displayName: routing.displayName,
+                    channel: routing.channel
+                )
+            }
+            if let routing = parsedTrack.audioOutput {
+                track.audioOutput = SDTrack.RoutingInfo(
+                    target: routing.target,
+                    displayName: routing.displayName,
+                    channel: routing.channel
+                )
+            }
+            if let routing = parsedTrack.midiInput {
+                track.midiInput = SDTrack.RoutingInfo(
+                    target: routing.target,
+                    displayName: routing.displayName,
+                    channel: routing.channel
+                )
+            }
+            if let routing = parsedTrack.midiOutput {
+                track.midiOutput = SDTrack.RoutingInfo(
+                    target: routing.target,
+                    displayName: routing.displayName,
+                    channel: routing.channel
+                )
+            }
+
+            track.liveSet = liveSet
+            context.insert(track)
+        }
+
+        liveSet.lastUpdated = Date()
+        print("Parsed \(parsedTracks.count) tracks from \(liveSet.name) (Live \(liveSet.liveVersion))")
+    }
+
+    /// Load subproject metadata from companion JSON file
+    private func loadSubprojectMetadata(for liveSet: SDLiveSet, folderUrl: URL) {
+        let baseName = URL(fileURLWithPath: liveSet.path).deletingPathExtension().lastPathComponent
+        let metadataFileName = "\(baseName)-meta.json"
+        let metadataUrl = folderUrl.appendingPathComponent(metadataFileName)
+
+        guard let metadataData = try? Data(contentsOf: metadataUrl) else { return }
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+
+        if let metadata = try? decoder.decode(SubprojectMetadataDTO.self, from: metadataData) {
+            liveSet.sourceLiveSetName = metadata.sourceLiveSetName
+            liveSet.sourceGroupId = metadata.sourceGroupId
+            liveSet.sourceGroupName = metadata.sourceGroupName
+            liveSet.extractedAt = metadata.extractedAt
+        }
+    }
+
+    /// DTO for reading subproject metadata JSON
+    private struct SubprojectMetadataDTO: Codable {
+        let sourceLiveSetName: String
+        let sourceGroupId: Int
+        let sourceGroupName: String
+        let extractedAt: Date
     }
 
     /// Rename any _subproject files to .subproject (Live substitutes . with _ on Save As)
@@ -209,7 +474,6 @@ class ProjectManager {
                     let newMetaUrl = folderUrl.appendingPathComponent(newMetaName)
 
                     if fileManager.fileExists(atPath: oldMetaUrl.path) {
-                        // Remove existing meta file if it exists
                         if fileManager.fileExists(atPath: newMetaUrl.path) {
                             try fileManager.removeItem(at: newMetaUrl)
                         }
@@ -221,81 +485,6 @@ class ProjectManager {
                 }
             }
         }
-    }
-
-    /// Scan a folder for .als files and categorize them
-    private func scanForLiveSets(in folderUrl: URL) -> [LiveSet] {
-        // Fix any _subproject files first (Live substitutes . with _ on Save As)
-        fixSubprojectFilenames(in: folderUrl)
-
-        let fileManager = FileManager.default
-        var liveSets: [LiveSet] = []
-        var versionFiles: [(url: URL, parentName: String)] = []
-
-        // Scan root folder for .als files
-        if let rootContents = try? fileManager.contentsOfDirectory(at: folderUrl, includingPropertiesForKeys: nil) {
-            for fileUrl in rootContents where fileUrl.pathExtension.lowercased() == "als" {
-                let fileName = fileUrl.lastPathComponent
-
-                if fileName.hasPrefix(".subproject-") {
-                    let subproject = LiveSet(path: fileUrl.path, category: .subproject)
-                    // Load metadata from companion -meta.json file
-                    let metadataFileName = SubprojectMetadata.metadataFileName(for: fileUrl.path)
-                    let metadataUrl = folderUrl.appendingPathComponent(metadataFileName)
-                    if let metadataData = try? Data(contentsOf: metadataUrl) {
-                        let decoder = JSONDecoder()
-                        decoder.dateDecodingStrategy = .iso8601
-                        if let metadata = try? decoder.decode(SubprojectMetadata.self, from: metadataData) {
-                            subproject.metadata = metadata
-                        }
-                    }
-                    // Load comment
-                    subproject.comment = loadComment(for: fileUrl)
-                    liveSets.append(subproject)
-                } else if fileName.hasPrefix(".version-") {
-                    // Parse version file: .version-{parentName}-{timestamp}.als
-                    if let parentName = extractParentName(from: fileName) {
-                        versionFiles.append((url: fileUrl, parentName: parentName))
-                    }
-                } else {
-                    let mainLiveSet = LiveSet(path: fileUrl.path, category: .main)
-                    // Load comment
-                    mainLiveSet.comment = loadComment(for: fileUrl)
-                    liveSets.append(mainLiveSet)
-                }
-            }
-        }
-
-        // Scan Backup folder
-        let backupUrl = folderUrl.appendingPathComponent("Backup")
-        if let backupContents = try? fileManager.contentsOfDirectory(at: backupUrl, includingPropertiesForKeys: nil) {
-            for fileUrl in backupContents where fileUrl.pathExtension.lowercased() == "als" {
-                let backup = LiveSet(path: fileUrl.path, category: .backup)
-                // Load comment (stored in Backup folder next to the .als file)
-                backup.comment = loadComment(for: fileUrl)
-                liveSets.append(backup)
-            }
-        }
-
-        // Link version files to their parent LiveSets and load comments
-        for (url, parentName) in versionFiles {
-            let version = LiveSet(path: url.path, category: .version)
-
-            // Load comment
-            version.comment = loadComment(for: url)
-
-            // Find parent by matching name
-            if let parent = liveSets.first(where: { $0.category == .main && $0.name == parentName }) {
-                parent.versions.append(version)
-            }
-        }
-
-        // Sort versions by timestamp (newest first, based on filename)
-        for liveSet in liveSets where liveSet.category == .main {
-            liveSet.versions.sort { $0.name > $1.name }
-        }
-
-        return liveSets
     }
 
     /// Load comment from companion -comment.txt file
@@ -312,7 +501,6 @@ class ProjectManager {
     /// Extract parent LiveSet name from version filename
     /// Format: .version-{parentName}-{timestamp}.als
     private func extractParentName(from fileName: String) -> String? {
-        // Remove ".version-" prefix and ".als" extension
         var name = fileName
         if name.hasPrefix(".version-") {
             name = String(name.dropFirst(".version-".count))
@@ -321,9 +509,6 @@ class ProjectManager {
             name = String(name.dropLast(".als".count))
         }
 
-        // Find the last hyphen followed by a timestamp pattern
-        // Timestamp format: YYYY-MM-DDTHH-MM-SSZ (ISO8601 with colons replaced by hyphens)
-        // We look for the pattern and extract everything before it
         if let range = name.range(of: #"-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z?$"#, options: .regularExpression) {
             return String(name[..<range.lowerBound])
         }
@@ -331,58 +516,204 @@ class ProjectManager {
         return nil
     }
 
-    /// Parse a specific Live Set
-    func parseLiveSet(_ liveSet: LiveSet) {
-        accessFile(at: AppState.shared.selectedProject?.path ?? "") { folderUrl in
-            let alsUrl = URL(fileURLWithPath: liveSet.path)
+    /// Parse a specific LiveSet and save tracks to SwiftData
+    func parseLiveSet(_ liveSet: SDLiveSet) {
+        guard let context = modelContext,
+              let projectPath = liveSet.project?.path else { return }
 
-            let parser = AlsParser()
-            guard parser.loadFile(at: alsUrl) else {
-                print("Failed to parse Live Set: \(parser.errorMessage ?? "unknown error")")
-                return
+        accessFile(at: projectPath) { _ in
+            parseLiveSetInternal(liveSet, context: context)
+            linkTracksToSubprojects(liveSet: liveSet, context: context)
+
+            do {
+                try context.save()
+            } catch {
+                print("Failed to save tracks: \(error)")
             }
-
-            let tracks = parser.getTracks()
-            liveSet.liveVersion = parser.liveVersion ?? "Unknown"
-            liveSet.tracks = tracks
-            liveSet.buildHierarchy()
-
-            // Link tracks to subprojects
-            if let project = AppState.shared.selectedProject {
-                liveSet.linkTracksToSubprojects(project: project)
-            }
-
-            liveSet.lastUpdated = Date()
-
-            print("Parsed \(tracks.count) tracks from \(liveSet.name) (Live \(liveSet.liveVersion))")
         }
     }
 
-    /// Reload a project folder after changes
+    /// Link group tracks to their extracted subprojects
+    private func linkTracksToSubprojects(liveSet: SDLiveSet, context: ModelContext) {
+        guard let projectPath = liveSet.project?.path else { return }
+
+        // Find subprojects for this LiveSet
+        let subprojectPredicate = SDPredicates.subprojectLiveSets(forProjectPath: projectPath)
+        let descriptor = FetchDescriptor<SDLiveSet>(predicate: subprojectPredicate)
+
+        guard let subprojects = try? context.fetch(descriptor) else { return }
+
+        // Build map of source group ID -> subproject path
+        var subprojectsByGroupId: [Int: String] = [:]
+        for subproject in subprojects {
+            if let sourceGroupId = subproject.sourceGroupId,
+               subproject.sourceLiveSetName == liveSet.name {
+                subprojectsByGroupId[sourceGroupId] = subproject.path
+            }
+        }
+
+        guard !subprojectsByGroupId.isEmpty else { return }
+
+        // Update tracks
+        for track in liveSet.tracks where track.isGroup {
+            if let subprojectPath = subprojectsByGroupId[track.trackId] {
+                track.subprojectPath = subprojectPath
+                print("Linked group '\(track.name)' (ID: \(track.trackId)) to subproject")
+            }
+        }
+    }
+
+    /// Get file modification date
+    private func getFileModificationDate(for fileUrl: URL) -> Date? {
+        try? FileManager.default.attributesOfItem(atPath: fileUrl.path)[.modificationDate] as? Date
+    }
+
+    /// Reload a project folder after changes - only processes changed files
     private func reloadProject(folderPath: String) {
+        guard let context = modelContext else { return }
+
         accessFile(at: folderPath) { folderUrl in
-            let liveSets = self.scanForLiveSets(in: folderUrl)
+            // Fix filenames first
+            self.fixSubprojectFilenames(in: folderUrl)
 
-            DispatchQueue.main.async {
-                if let project = AppState.shared.projects.first(where: { $0.path == folderPath }) {
-                    // Update live sets list
-                    project.liveSets = liveSets
-                    project.lastUpdated = Date()
+            // Find the project
+            let predicate = #Predicate<SDProject> { $0.path == folderPath }
+            let descriptor = FetchDescriptor<SDProject>(predicate: predicate)
 
-                    // Re-parse currently selected Live Set if it still exists
-                    if let selected = AppState.shared.selectedLiveSet,
-                       liveSets.contains(where: { $0.path == selected.path }) {
-                        self.parseLiveSet(selected)
+            guard let project = try? context.fetch(descriptor).first else { return }
+
+            // Incremental update: only process changed files
+            self.incrementalUpdate(in: folderUrl, for: project, context: context)
+        }
+    }
+
+    /// Incrementally update LiveSets - only re-parse changed files
+    private func incrementalUpdate(in folderUrl: URL, for project: SDProject, context: ModelContext) {
+        let fileManager = FileManager.default
+
+        // Build map of existing LiveSets by path
+        var existingByPath: [String: SDLiveSet] = [:]
+        for liveSet in project.liveSets {
+            existingByPath[liveSet.path] = liveSet
+        }
+
+        // Collect current files on disk
+        var currentFilePaths: Set<String> = []
+        var changedLiveSets: [SDLiveSet] = []
+        var newLiveSets: [SDLiveSet] = []
+
+        // Scan root folder
+        if let rootContents = try? fileManager.contentsOfDirectory(at: folderUrl, includingPropertiesForKeys: [.contentModificationDateKey]) {
+            for fileUrl in rootContents where fileUrl.pathExtension.lowercased() == "als" {
+                let fileName = fileUrl.lastPathComponent
+                let filePath = fileUrl.path
+                currentFilePaths.insert(filePath)
+
+                let currentModDate = getFileModificationDate(for: fileUrl)
+
+                if let existing = existingByPath[filePath] {
+                    // Check if file was modified
+                    if let storedDate = existing.fileModificationDate,
+                       let currentDate = currentModDate,
+                       currentDate > storedDate {
+                        existing.fileModificationDate = currentDate
+                        changedLiveSets.append(existing)
+                        print("File changed: \(existing.name)")
                     }
+                } else {
+                    // New file
+                    let category: SDLiveSetCategory
+                    if fileName.hasPrefix(".subproject-") {
+                        category = .subproject
+                    } else if fileName.hasPrefix(".version-") {
+                        category = .version
+                    } else {
+                        category = .main
+                    }
+
+                    let liveSet = SDLiveSet(path: filePath, category: category)
+                    liveSet.comment = loadComment(for: fileUrl)
+                    liveSet.fileModificationDate = currentModDate
+                    liveSet.project = project
+                    context.insert(liveSet)
+
+                    if category == .subproject {
+                        loadSubprojectMetadata(for: liveSet, folderUrl: folderUrl)
+                    }
+
+                    newLiveSets.append(liveSet)
+                    print("New file: \(liveSet.name)")
                 }
             }
+        }
+
+        // Scan Backup folder
+        let backupUrl = folderUrl.appendingPathComponent("Backup")
+        if let backupContents = try? fileManager.contentsOfDirectory(at: backupUrl, includingPropertiesForKeys: [.contentModificationDateKey]) {
+            for fileUrl in backupContents where fileUrl.pathExtension.lowercased() == "als" {
+                let filePath = fileUrl.path
+                currentFilePaths.insert(filePath)
+
+                let currentModDate = getFileModificationDate(for: fileUrl)
+
+                if let existing = existingByPath[filePath] {
+                    if let storedDate = existing.fileModificationDate,
+                       let currentDate = currentModDate,
+                       currentDate > storedDate {
+                        existing.fileModificationDate = currentDate
+                        changedLiveSets.append(existing)
+                        print("File changed: \(existing.name)")
+                    }
+                } else {
+                    let liveSet = SDLiveSet(path: filePath, category: .backup)
+                    liveSet.comment = loadComment(for: fileUrl)
+                    liveSet.fileModificationDate = currentModDate
+                    liveSet.project = project
+                    context.insert(liveSet)
+                    newLiveSets.append(liveSet)
+                    print("New backup file: \(liveSet.name)")
+                }
+            }
+        }
+
+        // Remove deleted files
+        for (path, liveSet) in existingByPath {
+            if !currentFilePaths.contains(path) {
+                print("Deleted file: \(liveSet.name)")
+                context.delete(liveSet)
+            }
+        }
+
+        // Parse only changed and new LiveSets
+        let toReparse = changedLiveSets + newLiveSets
+        if !toReparse.isEmpty {
+            print("Re-parsing \(toReparse.count) LiveSet(s)...")
+            for liveSet in toReparse {
+                // Wrap in autoreleasepool to free memory after each file is parsed
+                autoreleasepool {
+                    parseLiveSetInternal(liveSet, context: context)
+                }
+            }
+
+            // Re-link subprojects for main LiveSets that changed
+            for liveSet in toReparse where liveSet.category == .main {
+                linkTracksToSubprojects(liveSet: liveSet, context: context)
+            }
+        } else {
+            print("No files changed")
+        }
+
+        do {
+            try context.save()
+        } catch {
+            print("Failed to save incremental update: \(error)")
         }
     }
 
     /// Write a file to a project folder (uses stored bookmark for access)
-    func writeToProjectFolder(_ project: Project, fileName: String, data: Data) -> URL? {
+    func writeToProjectFolder(projectPath: String, fileName: String, data: Data) -> URL? {
         var resultUrl: URL?
-        accessFile(at: project.path) { folderUrl in
+        accessFile(at: projectPath) { folderUrl in
             let fileUrl = folderUrl.appendingPathComponent(fileName)
             do {
                 try data.write(to: fileUrl)
@@ -396,59 +727,60 @@ class ProjectManager {
     }
 
     /// Extract a group as a subproject (uses bookmark for folder access)
-    func extractSubproject(from liveSetPath: String, groupId: Int, groupName: String, sourceLiveSetName: String, to outputPath: String, project: Project, completion: @escaping (String?) -> Void) {
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            self?.accessFile(at: project.path) { folderUrl in
-                let extractor = AlsExtractor()
-                let result = extractor.extractGroup(from: liveSetPath, groupId: groupId, to: outputPath)
+    func extractSubproject(from liveSetPath: String, groupId: Int, groupName: String, sourceLiveSetName: String, to outputPath: String, projectPath: String, completion: @escaping (String?) -> Void) {
+        Task.detached { [weak self] in
+            await MainActor.run {
+                self?.accessFile(at: projectPath) { folderUrl in
+                    let extractor = AlsExtractor()
+                    let result = extractor.extractGroup(from: liveSetPath, groupId: groupId, to: outputPath)
 
-                if result.success, let outputPath = result.outputPath {
-                    // Save metadata JSON file
-                    let metadata = SubprojectMetadata(
-                        sourceLiveSetName: sourceLiveSetName,
-                        sourceGroupId: groupId,
-                        sourceGroupName: groupName,
-                        extractedAt: Date()
-                    )
+                    if result.success, let outputPath = result.outputPath {
+                        // Save metadata JSON file
+                        let baseName = URL(fileURLWithPath: outputPath).deletingPathExtension().lastPathComponent
+                        let metadataFileName = "\(baseName)-meta.json"
+                        let metadataUrl = folderUrl.appendingPathComponent(metadataFileName)
 
-                    let metadataFileName = SubprojectMetadata.metadataFileName(for: outputPath)
-                    let metadataUrl = folderUrl.appendingPathComponent(metadataFileName)
+                        let metadata: [String: Any] = [
+                            "sourceLiveSetName": sourceLiveSetName,
+                            "sourceGroupId": groupId,
+                            "sourceGroupName": groupName,
+                            "extractedAt": ISO8601DateFormatter().string(from: Date())
+                        ]
 
-                    do {
-                        let encoder = JSONEncoder()
-                        encoder.dateEncodingStrategy = .iso8601
-                        encoder.outputFormatting = .prettyPrinted
-                        let jsonData = try encoder.encode(metadata)
-                        try jsonData.write(to: metadataUrl)
-                        print("Saved metadata: \(metadataFileName)")
-                    } catch {
-                        print("Failed to save metadata: \(error)")
+                        if let jsonData = try? JSONSerialization.data(withJSONObject: metadata, options: .prettyPrinted) {
+                            try? jsonData.write(to: metadataUrl)
+                            print("Saved metadata: \(metadataFileName)")
+                        }
+
+                        completion(outputPath)
+                    } else {
+                        print("Extraction failed: \(result.error ?? "unknown error")")
+                        completion(nil)
                     }
-
-                    completion(outputPath)
-                } else {
-                    print("Extraction failed: \(result.error ?? "unknown error")")
-                    completion(nil)
                 }
             }
         }
     }
 
     /// Rescan a project folder to update the live sets list
-    func rescanProject(_ project: Project) {
-        accessFile(at: project.path) { folderUrl in
-            let liveSets = self.scanForLiveSets(in: folderUrl)
+    func rescanProject(projectPath: String) {
+        guard let context = modelContext else { return }
 
-            DispatchQueue.main.async {
-                project.liveSets = liveSets
-                project.lastUpdated = Date()
-            }
+        accessFile(at: projectPath) { folderUrl in
+            let predicate = #Predicate<SDProject> { $0.path == projectPath }
+            let descriptor = FetchDescriptor<SDProject>(predicate: predicate)
+
+            guard let project = try? context.fetch(descriptor).first else { return }
+
+            self.scanAndSaveLiveSets(in: folderUrl, for: project, context: context)
         }
     }
 
     /// Create a version of a LiveSet by copying it with a timestamp
-    func createVersion(of liveSet: LiveSet, in project: Project, comment: String? = nil) {
-        accessFile(at: project.path) { folderUrl in
+    func createVersion(of liveSet: SDLiveSet, comment: String? = nil) {
+        guard let projectPath = liveSet.project?.path else { return }
+
+        accessFile(at: projectPath) { folderUrl in
             let fileManager = FileManager.default
             let sourceUrl = URL(fileURLWithPath: liveSet.path)
 
@@ -476,11 +808,45 @@ class ProjectManager {
                 }
 
                 // Rescan project to show new version
-                DispatchQueue.main.async {
-                    self.rescanProject(project)
-                }
+                self.rescanProject(projectPath: projectPath)
             } catch {
                 print("Failed to create version: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Save a comment for a LiveSet
+    func saveComment(for liveSet: SDLiveSet, comment: String) {
+        guard let projectPath = liveSet.project?.path else { return }
+
+        let url = URL(fileURLWithPath: liveSet.path)
+        let baseName = url.deletingPathExtension().lastPathComponent
+        let commentFileName = "\(baseName)-comment.txt"
+        let folderUrl = url.deletingLastPathComponent()
+        let commentUrl = folderUrl.appendingPathComponent(commentFileName)
+
+        accessFile(at: projectPath) { _ in
+            do {
+                let trimmedComment = comment.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmedComment.isEmpty {
+                    // Delete the comment file if comment is empty
+                    if FileManager.default.fileExists(atPath: commentUrl.path) {
+                        try FileManager.default.removeItem(at: commentUrl)
+                        print("Deleted comment file: \(commentFileName)")
+                    }
+                    liveSet.comment = nil
+                } else {
+                    // Write the comment to file
+                    try trimmedComment.write(to: commentUrl, atomically: true, encoding: .utf8)
+                    print("Saved comment: \(commentFileName)")
+                    liveSet.comment = trimmedComment
+                }
+
+                if let context = self.modelContext {
+                    try context.save()
+                }
+            } catch {
+                print("Failed to save comment: \(error.localizedDescription)")
             }
         }
     }

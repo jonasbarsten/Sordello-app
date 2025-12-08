@@ -6,36 +6,32 @@
 //
 
 import SwiftUI
+import SwiftData
+
+// MARK: - Track Inspector (SwiftData)
 
 /// Inspector panel showing detailed track information
-struct TrackInspectorView: View {
-    let track: Track
-    let project: Project?
+struct SDTrackInspectorView: View {
+    let track: SDTrack
+    @Environment(\.modelContext) private var modelContext
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                // Header
                 headerSection
-
                 Divider()
-
-                // Properties
                 propertiesSection
 
-                // Routing
                 if hasRoutingInfo {
                     Divider()
                     routingSection
                 }
 
-                // Group info (child count)
                 if track.isGroup {
                     Divider()
                     groupSection
                 }
 
-                // Subproject info
                 if let subprojectPath = track.subprojectPath {
                     Divider()
                     subprojectSection(path: subprojectPath)
@@ -72,7 +68,7 @@ struct TrackInspectorView: View {
                     .background(Color.secondary.opacity(0.2))
                     .cornerRadius(4)
 
-                Text("ID: \(track.id)")
+                Text("ID: \(track.trackId)")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -87,16 +83,13 @@ struct TrackInspectorView: View {
                 .font(.headline)
                 .foregroundColor(.secondary)
 
-            // Color
             PropertyRow(label: "Color", value: track.colorName, icon: "paintpalette.fill")
                 .foregroundColor(abletonColor(for: track.color))
 
-            // Frozen status
             if track.isFrozen {
                 PropertyRow(label: "Status", value: "Frozen", icon: "snowflake")
             }
 
-            // Track delay
             if track.trackDelay != 0 {
                 let unit = track.isDelayInSamples ? "samples" : "ms"
                 PropertyRow(
@@ -106,7 +99,6 @@ struct TrackInspectorView: View {
                 )
             }
 
-            // Parent group
             if let parentId = track.parentGroupId {
                 PropertyRow(label: "Parent Group ID", value: "\(parentId)", icon: "folder")
             } else {
@@ -129,24 +121,45 @@ struct TrackInspectorView: View {
                 .foregroundColor(.secondary)
 
             if let audioIn = track.audioInput {
-                RoutingRow(label: "Audio In", routing: audioIn, icon: "arrow.right.circle")
+                SDRoutingRow(label: "Audio In", routing: audioIn, icon: "arrow.right.circle")
             }
 
             if let audioOut = track.audioOutput {
-                RoutingRow(label: "Audio Out", routing: audioOut, icon: "arrow.left.circle")
+                SDRoutingRow(label: "Audio Out", routing: audioOut, icon: "arrow.left.circle")
             }
 
             if let midiIn = track.midiInput {
-                RoutingRow(label: "MIDI In", routing: midiIn, icon: "pianokeys")
+                SDRoutingRow(label: "MIDI In", routing: midiIn, icon: "pianokeys")
             }
 
             if let midiOut = track.midiOutput {
-                RoutingRow(label: "MIDI Out", routing: midiOut, icon: "pianokeys")
+                SDRoutingRow(label: "MIDI Out", routing: midiOut, icon: "pianokeys")
             }
         }
     }
 
     // MARK: - Group Section
+
+    private var childCount: Int {
+        guard let liveSetPath = track.liveSet?.path else { return 0 }
+        let parentId = track.trackId
+        let predicate = #Predicate<SDTrack> { t in
+            t.liveSet?.path == liveSetPath && t.parentGroupId == parentId
+        }
+        let descriptor = FetchDescriptor<SDTrack>(predicate: predicate)
+        return (try? modelContext.fetchCount(descriptor)) ?? 0
+    }
+
+    private func countByType(_ type: SDTrackType) -> Int {
+        guard let liveSetPath = track.liveSet?.path else { return 0 }
+        let parentId = track.trackId
+        let typeRaw = type.rawValue
+        let predicate = #Predicate<SDTrack> { t in
+            t.liveSet?.path == liveSetPath && t.parentGroupId == parentId && t.typeRaw == typeRaw
+        }
+        let descriptor = FetchDescriptor<SDTrack>(predicate: predicate)
+        return (try? modelContext.fetchCount(descriptor)) ?? 0
+    }
 
     private var groupSection: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -154,17 +167,16 @@ struct TrackInspectorView: View {
                 .font(.headline)
                 .foregroundColor(.secondary)
 
-            let childCount = track.children.count
+            let count = childCount
             PropertyRow(
                 label: "Children",
-                value: "\(childCount) track\(childCount == 1 ? "" : "s")",
+                value: "\(count) track\(count == 1 ? "" : "s")",
                 icon: "list.bullet.indent"
             )
 
-            // Count by type
-            let audioCount = track.children.filter { $0.type == .audio }.count
-            let midiCount = track.children.filter { $0.type == .midi }.count
-            let groupCount = track.children.filter { $0.type == .group }.count
+            let audioCount = countByType(.audio)
+            let midiCount = countByType(.midi)
+            let groupCount = countByType(.group)
 
             if audioCount > 0 {
                 PropertyRow(label: "Audio Tracks", value: "\(audioCount)", icon: "waveform")
@@ -211,14 +223,11 @@ struct TrackInspectorView: View {
     // MARK: - Helpers
 
     private func navigateToSubproject(path: String) {
-        guard let project = project else { return }
-        if let subproject = project.subprojectLiveSets.first(where: { $0.path == path }) {
-            AppState.shared.selectedLiveSet = subproject
-            AppState.shared.selectedTrack = nil
-        }
+        UIState.shared.selectedLiveSetPath = path
+        UIState.shared.selectedTrackId = nil
     }
 
-    private func iconForTrackType(_ type: Track.TrackType) -> String {
+    private func iconForTrackType(_ type: SDTrackType) -> String {
         switch type {
         case .audio: return "waveform"
         case .midi: return "pianokeys"
@@ -227,7 +236,7 @@ struct TrackInspectorView: View {
         }
     }
 
-    private func colorForTrackType(_ type: Track.TrackType) -> Color {
+    private func colorForTrackType(_ type: SDTrackType) -> Color {
         switch type {
         case .audio: return .orange
         case .midi: return .purple
@@ -238,26 +247,26 @@ struct TrackInspectorView: View {
 
     private func abletonColor(for index: Int) -> Color {
         let colors: [Color] = [
-            Color(red: 1.0, green: 0.6, blue: 0.6),   // Rose
-            Color(red: 1.0, green: 0.3, blue: 0.3),   // Red
-            Color(red: 1.0, green: 0.6, blue: 0.2),   // Orange
-            Color(red: 1.0, green: 0.8, blue: 0.4),   // Light Orange
-            Color(red: 1.0, green: 1.0, blue: 0.6),   // Light Yellow
-            Color(red: 1.0, green: 1.0, blue: 0.2),   // Yellow
-            Color(red: 0.6, green: 1.0, blue: 0.2),   // Lime
-            Color(red: 0.2, green: 0.8, blue: 0.2),   // Green
-            Color(red: 0.4, green: 1.0, blue: 0.8),   // Mint
-            Color(red: 0.2, green: 1.0, blue: 1.0),   // Cyan
-            Color(red: 0.4, green: 0.8, blue: 1.0),   // Sky
-            Color(red: 0.6, green: 0.8, blue: 1.0),   // Light Blue
-            Color(red: 0.4, green: 0.4, blue: 1.0),   // Blue
-            Color(red: 0.6, green: 0.4, blue: 1.0),   // Purple
-            Color(red: 0.8, green: 0.4, blue: 1.0),   // Violet
-            Color(red: 1.0, green: 0.4, blue: 0.8),   // Magenta
-            Color(red: 1.0, green: 0.6, blue: 0.8),   // Pink
-            Color(red: 0.8, green: 0.8, blue: 0.8),   // Light Gray
-            Color(red: 0.5, green: 0.5, blue: 0.5),   // Medium Gray
-            Color(red: 0.3, green: 0.3, blue: 0.3),   // Dark Gray
+            Color(red: 1.0, green: 0.6, blue: 0.6),
+            Color(red: 1.0, green: 0.3, blue: 0.3),
+            Color(red: 1.0, green: 0.6, blue: 0.2),
+            Color(red: 1.0, green: 0.8, blue: 0.4),
+            Color(red: 1.0, green: 1.0, blue: 0.6),
+            Color(red: 1.0, green: 1.0, blue: 0.2),
+            Color(red: 0.6, green: 1.0, blue: 0.2),
+            Color(red: 0.2, green: 0.8, blue: 0.2),
+            Color(red: 0.4, green: 1.0, blue: 0.8),
+            Color(red: 0.2, green: 1.0, blue: 1.0),
+            Color(red: 0.4, green: 0.8, blue: 1.0),
+            Color(red: 0.6, green: 0.8, blue: 1.0),
+            Color(red: 0.4, green: 0.4, blue: 1.0),
+            Color(red: 0.6, green: 0.4, blue: 1.0),
+            Color(red: 0.8, green: 0.4, blue: 1.0),
+            Color(red: 1.0, green: 0.4, blue: 0.8),
+            Color(red: 1.0, green: 0.6, blue: 0.8),
+            Color(red: 0.8, green: 0.8, blue: 0.8),
+            Color(red: 0.5, green: 0.5, blue: 0.5),
+            Color(red: 0.3, green: 0.3, blue: 0.3),
         ]
         guard index >= 0 && index < colors.count else { return .gray }
         return colors[index]
@@ -289,9 +298,9 @@ struct PropertyRow: View {
     }
 }
 
-struct RoutingRow: View {
+struct SDRoutingRow: View {
     let label: String
-    let routing: TrackRouting
+    let routing: SDTrack.RoutingInfo
     let icon: String
 
     var body: some View {
@@ -324,35 +333,27 @@ struct RoutingRow: View {
     }
 }
 
-// MARK: - LiveSet Inspector View
+// MARK: - LiveSet Inspector (SwiftData)
 
 /// Inspector panel showing detailed LiveSet information
-struct LiveSetInspectorView: View {
-    let liveSet: LiveSet
-    var project: Project?
+struct SDLiveSetInspectorView: View {
+    let liveSet: SDLiveSet
+    @Environment(\.modelContext) private var modelContext
     @State private var editableComment: String = ""
     @State private var isEditingComment: Bool = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                // Header
                 headerSection
-
                 Divider()
-
-                // Properties
                 propertiesSection
-
                 Divider()
-
-                // Track Summary
                 trackSummarySection
 
-                // Subproject info (if applicable)
-                if liveSet.category == .subproject, let metadata = liveSet.metadata {
+                if liveSet.category == .subproject, liveSet.hasMetadata {
                     Divider()
-                    subprojectSection(metadata: metadata)
+                    subprojectSection
                 }
 
                 Spacer()
@@ -405,7 +406,6 @@ struct LiveSetInspectorView: View {
             PropertyRow(label: "Modified", value: lastModified, icon: "clock")
             PropertyRow(label: "Path", value: liveSet.path, icon: "folder")
 
-            // Editable comment section for all LiveSet types
             commentSection
         }
     }
@@ -464,7 +464,7 @@ struct LiveSetInspectorView: View {
         .onAppear {
             editableComment = liveSet.comment ?? ""
         }
-        .onChange(of: liveSet.id) { _, _ in
+        .onChange(of: liveSet.path) { _, _ in
             editableComment = liveSet.comment ?? ""
             isEditingComment = false
         }
@@ -472,19 +472,45 @@ struct LiveSetInspectorView: View {
 
     // MARK: - Track Summary Section
 
+    private var totalTrackCount: Int {
+        let liveSetPath = liveSet.path
+        let predicate = #Predicate<SDTrack> { $0.liveSet?.path == liveSetPath }
+        let descriptor = FetchDescriptor<SDTrack>(predicate: predicate)
+        return (try? modelContext.fetchCount(descriptor)) ?? 0
+    }
+
+    private func trackCountByType(_ type: SDTrackType) -> Int {
+        let liveSetPath = liveSet.path
+        let typeRaw = type.rawValue
+        let predicate = #Predicate<SDTrack> { track in
+            track.liveSet?.path == liveSetPath && track.typeRaw == typeRaw
+        }
+        let descriptor = FetchDescriptor<SDTrack>(predicate: predicate)
+        return (try? modelContext.fetchCount(descriptor)) ?? 0
+    }
+
+    private var versionCount: Int {
+        let versionCategory = SDLiveSetCategory.version.rawValue
+        let parentPath = liveSet.path
+        let predicate = #Predicate<SDLiveSet> { ls in
+            ls.categoryRaw == versionCategory && ls.parentLiveSetPath == parentPath
+        }
+        let descriptor = FetchDescriptor<SDLiveSet>(predicate: predicate)
+        return (try? modelContext.fetchCount(descriptor)) ?? 0
+    }
+
     private var trackSummarySection: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Tracks")
                 .font(.headline)
                 .foregroundColor(.secondary)
 
-            let totalTracks = liveSet.tracks.count
-            PropertyRow(label: "Total Tracks", value: "\(totalTracks)", icon: "list.bullet")
+            PropertyRow(label: "Total Tracks", value: "\(totalTrackCount)", icon: "list.bullet")
 
-            let audioCount = liveSet.tracks.filter { $0.type == .audio }.count
-            let midiCount = liveSet.tracks.filter { $0.type == .midi }.count
-            let groupCount = liveSet.tracks.filter { $0.type == .group }.count
-            let returnCount = liveSet.tracks.filter { $0.type == .returnTrack }.count
+            let audioCount = trackCountByType(.audio)
+            let midiCount = trackCountByType(.midi)
+            let groupCount = trackCountByType(.group)
+            let returnCount = trackCountByType(.returnTrack)
 
             if audioCount > 0 {
                 PropertyRow(label: "Audio Tracks", value: "\(audioCount)", icon: "waveform")
@@ -499,28 +525,29 @@ struct LiveSetInspectorView: View {
                 PropertyRow(label: "Return Tracks", value: "\(returnCount)", icon: "arrow.turn.up.right")
             }
 
-            // Versions count (for main LiveSets)
-            if liveSet.category == .main && !liveSet.versions.isEmpty {
-                PropertyRow(label: "Versions", value: "\(liveSet.versions.count)", icon: "clock.arrow.circlepath")
+            if liveSet.category == .main && versionCount > 0 {
+                PropertyRow(label: "Versions", value: "\(versionCount)", icon: "clock.arrow.circlepath")
             }
         }
     }
 
     // MARK: - Subproject Section
 
-    private func subprojectSection(metadata: SubprojectMetadata) -> some View {
+    private var subprojectSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Source")
                 .font(.headline)
                 .foregroundColor(.secondary)
 
-            PropertyRow(label: "Live Set", value: metadata.sourceLiveSetName, icon: "doc.fill")
-            PropertyRow(label: "Group", value: metadata.sourceGroupName, icon: "folder.fill")
-            PropertyRow(label: "Group ID", value: "\(metadata.sourceGroupId)", icon: "number")
-            PropertyRow(label: "Extracted", value: formatDate(metadata.extractedAt), icon: "calendar")
+            PropertyRow(label: "Live Set", value: liveSet.sourceLiveSetName ?? "", icon: "doc.fill")
+            PropertyRow(label: "Group", value: liveSet.sourceGroupName ?? "", icon: "folder.fill")
+            PropertyRow(label: "Group ID", value: "\(liveSet.sourceGroupId ?? 0)", icon: "number")
+            if let extractedAt = liveSet.extractedAt {
+                PropertyRow(label: "Extracted", value: formatDate(extractedAt), icon: "calendar")
+            }
 
             Button {
-                navigateToSource(metadata: metadata)
+                navigateToSource()
             } label: {
                 Label("Go to Source", systemImage: "arrow.uturn.backward.circle")
             }
@@ -528,73 +555,32 @@ struct LiveSetInspectorView: View {
         }
     }
 
-    private func navigateToSource(metadata: SubprojectMetadata) {
-        guard let project = project else { return }
+    private func navigateToSource() {
+        guard let projectPath = liveSet.project?.path,
+              let sourceName = liveSet.sourceLiveSetName else { return }
 
-        // Find the source LiveSet by name
-        guard let sourceLiveSet = project.mainLiveSets.first(where: { $0.name == metadata.sourceLiveSetName }) else {
-            return
+        // Find source LiveSet by name
+        let mainCategory = SDLiveSetCategory.main.rawValue
+        let predicate = #Predicate<SDLiveSet> { ls in
+            ls.project?.path == projectPath && ls.categoryRaw == mainCategory
         }
+        let descriptor = FetchDescriptor<SDLiveSet>(predicate: predicate)
 
-        // Select the source LiveSet
-        AppState.shared.selectedLiveSet = sourceLiveSet
+        guard let mainSets = try? modelContext.fetch(descriptor),
+              let source = mainSets.first(where: { $0.name == sourceName }) else { return }
 
-        // Find and select the source group track
-        func findTrack(withId id: Int, in tracks: [Track]) -> Track? {
-            for track in tracks {
-                if track.id == id {
-                    return track
-                }
-                if let found = findTrack(withId: id, in: track.children) {
-                    return found
-                }
-            }
-            return nil
-        }
+        UIState.shared.selectedLiveSetPath = source.path
 
-        if let sourceTrack = findTrack(withId: metadata.sourceGroupId, in: sourceLiveSet.tracks) {
-            AppState.shared.selectedTrack = sourceTrack
+        // Select the source group track
+        if let groupId = liveSet.sourceGroupId {
+            UIState.shared.selectedTrackId = groupId
         } else {
-            AppState.shared.selectedTrack = nil
+            UIState.shared.selectedTrackId = nil
         }
     }
 
     private func saveComment() {
-        guard let project = project else {
-            isEditingComment = false
-            return
-        }
-
-        // Generate comment filename: {baseName}-comment.txt
-        let url = URL(fileURLWithPath: liveSet.path)
-        let baseName = url.deletingPathExtension().lastPathComponent
-        let commentFileName = "\(baseName)-comment.txt"
-        let folderUrl = url.deletingLastPathComponent()
-        let commentUrl = folderUrl.appendingPathComponent(commentFileName)
-
-        // Access the project folder to write
-        ProjectManager.shared.accessFile(at: project.path) { _ in
-            do {
-                let trimmedComment = editableComment.trimmingCharacters(in: .whitespacesAndNewlines)
-                if trimmedComment.isEmpty {
-                    // Delete the comment file if comment is empty
-                    if FileManager.default.fileExists(atPath: commentUrl.path) {
-                        try FileManager.default.removeItem(at: commentUrl)
-                        print("Deleted comment file: \(commentFileName)")
-                    }
-                    liveSet.comment = nil
-                } else {
-                    // Write the comment to file
-                    try trimmedComment.write(to: commentUrl, atomically: true, encoding: .utf8)
-                    print("Saved comment: \(commentFileName)")
-                    liveSet.comment = trimmedComment
-                }
-                editableComment = trimmedComment
-            } catch {
-                print("Failed to save comment: \(error.localizedDescription)")
-            }
-        }
-
+        ProjectManager.shared.saveComment(for: liveSet, comment: editableComment)
         isEditingComment = false
     }
 
@@ -625,7 +611,7 @@ struct LiveSetInspectorView: View {
         return formatter.string(from: date)
     }
 
-    private func iconForCategory(_ category: LiveSetCategory) -> String {
+    private func iconForCategory(_ category: SDLiveSetCategory) -> String {
         switch category {
         case .main: return "doc.fill"
         case .subproject: return "doc.badge.gearshape.fill"
@@ -634,7 +620,7 @@ struct LiveSetInspectorView: View {
         }
     }
 
-    private func colorForCategory(_ category: LiveSetCategory) -> Color {
+    private func colorForCategory(_ category: SDLiveSetCategory) -> Color {
         switch category {
         case .main: return .blue
         case .subproject: return .purple
@@ -645,20 +631,18 @@ struct LiveSetInspectorView: View {
 }
 
 #Preview("Track Inspector") {
-    TrackInspectorView(
-        track: Track(
-            id: 15,
+    SDTrackInspectorView(
+        track: SDTrack(
+            trackId: 15,
             name: "Test Track",
             type: .audio,
             parentGroupId: nil
-        ),
-        project: nil
+        )
     )
 }
 
 #Preview("LiveSet Inspector") {
-    LiveSetInspectorView(
-        liveSet: LiveSet(path: "/test/path.als", category: .main),
-        project: nil
+    SDLiveSetInspectorView(
+        liveSet: SDLiveSet(path: "/test/path.als", category: .main)
     )
 }
