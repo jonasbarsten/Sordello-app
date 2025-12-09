@@ -69,12 +69,20 @@ final class ProjectManager {
     /// Per-project databases keyed by project path
     private var projectDatabases: [String: ProjectDatabase] = [:]
 
+    /// Per-project version control (file-based)
+    private var versionControls: [String: VersionControl] = [:]
+
     /// List of currently open project paths (for UI)
     private(set) var openProjectPaths: [String] = []
 
     /// Get the database for a project
     func database(forProjectPath path: String) -> ProjectDatabase? {
         return projectDatabases[path]
+    }
+
+    /// Get the version control for a project
+    func versionControl(forProjectPath path: String) -> VersionControl? {
+        return versionControls[path]
     }
 
     /// Get the current project's database (convenience for UI state)
@@ -211,6 +219,13 @@ final class ProjectManager {
                 projectDatabases[folderUrl.path] = projectDb
             }
 
+            // Initialize version control (file-based) at .sordello/versions/
+            if versionControls[folderUrl.path] == nil {
+                let vc = VersionControl(projectPath: folderUrl.path)
+                try vc.initializeIfNeeded()
+                versionControls[folderUrl.path] = vc
+            }
+
             // Get or create the project record
             let project = try projectDb.getOrCreateProject()
 
@@ -225,6 +240,12 @@ final class ProjectManager {
                 // Existing data - do incremental update to preserve parsed data
                 print("Existing project database with \(existingLiveSets.count) LiveSets, doing incremental update...")
                 try incrementalUpdate(in: folderUrl, for: project, db: projectDb)
+            }
+
+            // Sync any orphaned version files to the database
+            if let vc = versionControls[folderUrl.path] {
+                let mainLiveSets = try projectDb.fetchMainLiveSets()
+                try vc.syncVersionsToDatabase(db: projectDb, mainLiveSets: mainLiveSets)
             }
 
             // Add to open projects list if not already there
@@ -789,10 +810,10 @@ final class ProjectManager {
             }
         }
 
-        // Remove deleted files
-        for (path, _) in existingByPath {
-            if !currentFilePaths.contains(path) {
-                print("Deleted file: \(existingByPath[path]?.name ?? path)")
+        // Remove deleted files (exclude version LiveSets - they're in .sordello/versions/)
+        for (path, liveSet) in existingByPath {
+            if !currentFilePaths.contains(path) && liveSet.category != .version {
+                print("Deleted file: \(liveSet.name)")
                 try db.deleteLiveSet(path: path)
             }
         }
@@ -810,6 +831,17 @@ final class ProjectManager {
             // Re-link subprojects for main LiveSets that changed
             for liveSet in toReparse where liveSet.category == .main {
                 linkTracksToSubprojects(liveSet: liveSet, projectPath: project.path)
+            }
+
+            // Auto-save versions of changed main LiveSets
+            if let vc = versionControls[project.path] {
+                for liveSet in toReparse where liveSet.category == .main {
+                    do {
+                        try vc.commitLiveSet(at: liveSet.path, db: db)
+                    } catch {
+                        print("VersionControl: Failed to save version of \(liveSet.name): \(error)")
+                    }
+                }
             }
         } else {
             print("No files changed")

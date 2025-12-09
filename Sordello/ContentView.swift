@@ -116,7 +116,6 @@ struct ProjectRow: View {
 struct LiveSetListView: View {
     let projectPath: String
     @State private var mainLiveSets: [LiveSet] = []
-    @State private var versions: [String: [LiveSet]] = [:]
     @State private var mainObservationTask: Task<Void, Never>?
 
     var body: some View {
@@ -126,7 +125,7 @@ struct LiveSetListView: View {
         )) {
             Section("Live Sets") {
                 ForEach(mainLiveSets, id: \.path) { liveSet in
-                    LiveSetRow(liveSet: liveSet, versions: versions[liveSet.path] ?? [])
+                    LiveSetRow(liveSet: liveSet)
                         .tag(liveSet.path)
                 }
             }
@@ -176,34 +175,20 @@ struct LiveSetListView: View {
                             return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedDescending
                         }
                     }
-                    // Load versions for each main LiveSet
-                    await loadVersions(for: fetched, db: projectDb)
                 }
             } catch {
                 // Observation cancelled
             }
         }
     }
-
-    private func loadVersions(for liveSets: [LiveSet], db: ProjectDatabase) async {
-        var newVersions: [String: [LiveSet]] = [:]
-        for liveSet in liveSets {
-            do {
-                let versionList = try db.fetchVersionLiveSets(forParentPath: liveSet.path)
-                newVersions[liveSet.path] = versionList
-            } catch {
-                newVersions[liveSet.path] = []
-            }
-        }
-        versions = newVersions
-    }
 }
 
 struct LiveSetRow: View {
     let liveSet: LiveSet
-    let versions: [LiveSet]
     @State private var trackCount: Int = 0
-    @State private var observationTask: Task<Void, Never>?
+    @State private var versions: [LiveSet] = []
+    @State private var trackObservationTask: Task<Void, Never>?
+    @State private var versionsObservationTask: Task<Void, Never>?
 
     var body: some View {
         DisclosureGroup {
@@ -211,7 +196,14 @@ struct LiveSetRow: View {
                 HStack {
                     Image(systemName: "clock.arrow.circlepath")
                         .foregroundColor(.orange)
-                    Text(version.name)
+                    VStack(alignment: .leading) {
+                        Text(version.name)
+                        if let date = version.fileModificationDate {
+                            Text(date.formatted(date: .abbreviated, time: .shortened))
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
                     Spacer()
                 }
                 .padding(.leading, 16)
@@ -223,9 +215,14 @@ struct LiveSetRow: View {
                     .foregroundColor(.blue)
                 VStack(alignment: .leading) {
                     Text(liveSet.name)
-                    Text("\(trackCount) tracks • Live \(liveSet.liveVersion)")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    HStack(spacing: 4) {
+                        Text("\(trackCount) tracks • Live \(liveSet.liveVersion)")
+                        if !versions.isEmpty {
+                            Text("• \(versions.count) version(s)")
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundColor(.secondary)
                 }
             }
         }
@@ -233,7 +230,8 @@ struct LiveSetRow: View {
             startObserving()
         }
         .onDisappear {
-            observationTask?.cancel()
+            trackObservationTask?.cancel()
+            versionsObservationTask?.cancel()
         }
     }
 
@@ -242,12 +240,26 @@ struct LiveSetRow: View {
               let projectDb = ProjectManager.shared.database(forProjectPath: projectPath),
               let db = projectDb.dbQueue else { return }
 
-        observationTask?.cancel()
-        observationTask = Task {
+        // Observe tracks
+        trackObservationTask?.cancel()
+        trackObservationTask = Task {
             let observation = projectDb.observeTracks(forLiveSetPath: liveSet.path)
             do {
                 for try await tracks in observation.values(in: db) {
                     trackCount = tracks.count
+                }
+            } catch {
+                // Observation cancelled
+            }
+        }
+
+        // Observe versions for this LiveSet
+        versionsObservationTask?.cancel()
+        versionsObservationTask = Task {
+            let observation = projectDb.observeVersionLiveSets(forParentPath: liveSet.path)
+            do {
+                for try await fetched in observation.values(in: db) {
+                    versions = fetched
                 }
             } catch {
                 // Observation cancelled
