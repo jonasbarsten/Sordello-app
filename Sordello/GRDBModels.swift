@@ -102,6 +102,9 @@ struct LiveSet: Codable, Identifiable, FetchableRecord, PersistableRecord, Senda
     var sourceGroupName: String?
     var extractedAt: Date?
 
+    /// Whether to auto-create versions when this LiveSet is saved (main LiveSets only)
+    var autoVersionEnabled: Bool
+
     /// Computed: Name from path
     var name: String {
         URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
@@ -118,6 +121,7 @@ struct LiveSet: Codable, Identifiable, FetchableRecord, PersistableRecord, Senda
         self.liveVersion = "Unknown"
         self.lastUpdated = Date()
         self.isParsed = false
+        self.autoVersionEnabled = true
 
         // Extract backup timestamp if this is a backup
         if category == .backup {

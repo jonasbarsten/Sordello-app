@@ -343,6 +343,7 @@ struct LiveSetInspectorView: View {
     let liveSet: LiveSet
     @State private var editableComment: String = ""
     @State private var isEditingComment: Bool = false
+    @State private var autoVersionEnabled: Bool = true
 
     var body: some View {
         ScrollView {
@@ -352,6 +353,11 @@ struct LiveSetInspectorView: View {
                 propertiesSection
                 Divider()
                 trackSummarySection
+
+                if liveSet.category == .main {
+                    Divider()
+                    versioningSection
+                }
 
                 if liveSet.category == .subproject, liveSet.hasMetadata {
                     Divider()
@@ -364,6 +370,12 @@ struct LiveSetInspectorView: View {
         }
         .frame(minWidth: 250, idealWidth: 280)
         .background(Color(nsColor: .controlBackgroundColor))
+        .onAppear {
+            autoVersionEnabled = liveSet.autoVersionEnabled
+        }
+        .onChange(of: liveSet.path) { _, _ in
+            autoVersionEnabled = liveSet.autoVersionEnabled
+        }
     }
 
     // MARK: - Header Section
@@ -536,6 +548,47 @@ struct LiveSetInspectorView: View {
             if liveSet.category == .main && versionCount > 0 {
                 PropertyRow(label: "Versions", value: "\(versionCount)", icon: "clock.arrow.circlepath")
             }
+        }
+    }
+
+    // MARK: - Versioning Section
+
+    private var versioningSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Versioning")
+                .font(.headline)
+                .foregroundColor(.secondary)
+
+            Toggle(isOn: $autoVersionEnabled) {
+                HStack {
+                    Image(systemName: "clock.arrow.circlepath")
+                        .frame(width: 20)
+                        .foregroundColor(.secondary)
+                    Text("Auto-version on save")
+                }
+                .font(.callout)
+            }
+            .toggleStyle(.switch)
+            .onChange(of: autoVersionEnabled) { _, newValue in
+                saveAutoVersionSetting(enabled: newValue)
+            }
+
+            Text("When enabled, a new version is automatically created each time this Live Set is saved.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    private func saveAutoVersionSetting(enabled: Bool) {
+        guard let projectPath = liveSet.projectPath,
+              let projectDb = ProjectManager.shared.database(forProjectPath: projectPath) else { return }
+
+        var updatedLiveSet = liveSet
+        updatedLiveSet.autoVersionEnabled = enabled
+        do {
+            try projectDb.updateLiveSet(updatedLiveSet)
+        } catch {
+            print("Failed to save auto-version setting: \(error)")
         }
     }
 

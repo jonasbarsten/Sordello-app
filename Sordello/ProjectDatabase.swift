@@ -143,6 +143,13 @@ final class ProjectDatabase {
             try db.create(index: "tracks_parentGroupId", on: "tracks", columns: ["parentGroupId"])
         }
 
+        // v2: Add autoVersionEnabled to live_sets
+        migrator.registerMigration("v2") { db in
+            try db.alter(table: "live_sets") { t in
+                t.add(column: "autoVersionEnabled", .boolean).notNull().defaults(to: true)
+            }
+        }
+
         try migrator.migrate(db)
     }
 

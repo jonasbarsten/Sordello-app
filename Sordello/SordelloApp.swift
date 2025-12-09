@@ -833,9 +833,9 @@ final class ProjectManager {
                 linkTracksToSubprojects(liveSet: liveSet, projectPath: project.path)
             }
 
-            // Auto-save versions of changed main LiveSets
+            // Auto-save versions of changed main LiveSets (if enabled)
             if let vc = versionControls[project.path] {
-                for liveSet in toReparse where liveSet.category == .main {
+                for liveSet in toReparse where liveSet.category == .main && liveSet.autoVersionEnabled {
                     do {
                         try vc.commitLiveSet(at: liveSet.path, db: db)
                     } catch {
