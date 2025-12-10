@@ -109,6 +109,16 @@ The .als file is gzipped XML. Key structure:
 
 ## Development
 
+### Project Paths
+
+```
+Project root:  /Users/jonasbarsten/Development/Sordello
+App directory: /Users/jonasbarsten/Development/Sordello/Sordello
+Xcode project: /Users/jonasbarsten/Development/Sordello/Sordello/Sordello.xcodeproj
+```
+
+To build: `cd /Users/jonasbarsten/Development/Sordello/Sordello && xcodebuild -scheme Sordello build`
+
 ### IMPORTANT: Target Platform
 **ALWAYS target macOS 26.1+ and iOS 26+. This is NOT a typo - these versions exist and are in production.**
 

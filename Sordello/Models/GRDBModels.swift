@@ -340,7 +340,6 @@ struct ConnectedDevice: Codable, Identifiable, FetchableRecord, PersistableRecor
 // MARK: - App State (Non-persisted UI state)
 
 /// UI state that doesn't need persistence - kept in memory
-@MainActor
 @Observable
 final class UIState {
     static let shared = UIState()

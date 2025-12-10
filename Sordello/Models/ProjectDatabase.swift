@@ -1,42 +1,54 @@
 //
-//  AppDatabase.swift
+//  ProjectDatabase.swift
 //  Sordello
 //
-//  Database manager for GRDB - replaces SwiftData ModelContainer
+//  Per-project database manager using GRDB
+//  Each Ableton project gets its own database at <project>/.sordello/db/sordello.db
+//  This ensures all metadata travels with the project when moved between computers
+//
 //  Created by Jonas Barsten on 08/12/2025.
 //
 
 import Foundation
 import GRDB
 
-/// Manages the app's SQLite database using GRDB
-@MainActor
-final class AppDatabase {
-    static let shared = AppDatabase()
+/// Manages a per-project SQLite database using GRDB
+/// Each project folder has its own database at .sordello/db/sordello.db
+/// nonisolated: GRDB's DatabaseQueue is thread-safe, safe to use from any thread
+nonisolated class ProjectDatabase {
 
     /// The database connection
     private(set) var dbQueue: DatabaseQueue?
 
+    /// Path to the database file
+    private(set) var databasePath: String?
+
+    /// Path to the project folder this database belongs to
+    let projectPath: String
+
     /// Whether the database is ready
     private(set) var isReady = false
 
-    private init() {}
+    init(projectPath: String) {
+        self.projectPath = projectPath
+    }
 
     // MARK: - Database Setup
 
-    /// Initialize the database (call from app startup)
+    /// Initialize the database for this project
+    /// Creates .sordello/db/ directory and database file if they don't exist
     func setup() throws {
-        // Store in Application Support
         let fileManager = FileManager.default
-        guard let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
-            throw DatabaseError.setupFailed("Could not find Application Support directory")
-        }
+        let projectUrl = URL(fileURLWithPath: projectPath)
 
-        // Create app directory if needed
-        let appDir = appSupport.appendingPathComponent("Sordello")
-        try fileManager.createDirectory(at: appDir, withIntermediateDirectories: true)
+        // Create .sordello/db/ directory
+        let sordelloDir = projectUrl.appendingPathComponent(".sordello")
+        let dbDir = sordelloDir.appendingPathComponent("db")
 
-        let dbPath = appDir.appendingPathComponent("sordello.db").path
+        try fileManager.createDirectory(at: dbDir, withIntermediateDirectories: true)
+
+        let dbPath = dbDir.appendingPathComponent("sordello.db").path
+        self.databasePath = dbPath
 
         var config = Configuration()
         config.foreignKeysEnabled = true
@@ -47,7 +59,14 @@ final class AppDatabase {
         try migrate()
 
         isReady = true
-        print("AppDatabase: Ready at \(dbPath)")
+        print("ProjectDatabase: Ready at \(dbPath)")
+    }
+
+    /// Close the database connection
+    func close() {
+        dbQueue = nil
+        isReady = false
+        print("ProjectDatabase: Closed for \(projectPath)")
     }
 
     /// Run database migrations
@@ -58,7 +77,7 @@ final class AppDatabase {
 
         // v1: Initial schema
         migrator.registerMigration("v1") { db in
-            // Projects table
+            // Projects table (mainly for metadata, path is this project)
             try db.create(table: "projects") { t in
                 t.primaryKey("path", .text)
                 t.column("lastUpdated", .datetime).notNull()
@@ -109,7 +128,7 @@ final class AppDatabase {
                 t.primaryKey(["liveSetPath", "trackId"])
             }
 
-            // ConnectedDevices table
+            // ConnectedDevices table (for OSC connections)
             try db.create(table: "connected_devices") { t in
                 t.primaryKey("instanceId", .text)
                 t.column("projectPath", .text)
@@ -125,32 +144,26 @@ final class AppDatabase {
             try db.create(index: "tracks_parentGroupId", on: "tracks", columns: ["parentGroupId"])
         }
 
-        try migrator.migrate(db)
-    }
-
-    /// Clear all data (for fresh start on each launch, like SwiftData was doing)
-    func clearAllData() throws {
-        guard let db = dbQueue else { return }
-
-        try db.write { db in
-            try Track.deleteAll(db)
-            try LiveSet.deleteAll(db)
-            try Project.deleteAll(db)
-            try ConnectedDevice.deleteAll(db)
+        // v2: Add autoVersionEnabled to live_sets
+        migrator.registerMigration("v2") { db in
+            try db.alter(table: "live_sets") { t in
+                t.add(column: "autoVersionEnabled", .boolean).notNull().defaults(to: true)
+            }
         }
-        print("AppDatabase: Cleared all data")
+
+        try migrator.migrate(db)
     }
 
     // MARK: - Project Operations
 
-    func getOrCreateProject(path: String) throws -> Project {
+    func getOrCreateProject() throws -> Project {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
         return try db.write { db in
-            if let existing = try Project.fetchOne(db, key: path) {
+            if let existing = try Project.fetchOne(db, key: projectPath) {
                 return existing
             }
-            var project = Project(path: path)
+            let project = Project(path: projectPath)
             try project.insert(db)
             return project
         }
@@ -164,11 +177,11 @@ final class AppDatabase {
         }
     }
 
-    func fetchProject(path: String) throws -> Project? {
+    func fetchProject() throws -> Project? {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
         return try db.read { db in
-            try Project.fetchOne(db, key: path)
+            try Project.fetchOne(db, key: projectPath)
         }
     }
 
@@ -178,7 +191,7 @@ final class AppDatabase {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
         try db.write { db in
-            var ls = liveSet
+            let ls = liveSet
             try ls.insert(db)
         }
     }
@@ -207,17 +220,18 @@ final class AppDatabase {
         }
     }
 
-    func fetchLiveSets(forProjectPath projectPath: String) throws -> [LiveSet] {
+    func fetchAllLiveSets() throws -> [LiveSet] {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
         return try db.read { db in
             try LiveSet
                 .filter(Column("projectPath") == projectPath)
+                .order(Column("category"), Column("path"))
                 .fetchAll(db)
         }
     }
 
-    func fetchMainLiveSets(forProjectPath projectPath: String) throws -> [LiveSet] {
+    func fetchMainLiveSets() throws -> [LiveSet] {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
         return try db.read { db in
@@ -229,7 +243,7 @@ final class AppDatabase {
         }
     }
 
-    func fetchSubprojectLiveSets(forProjectPath projectPath: String) throws -> [LiveSet] {
+    func fetchSubprojectLiveSets() throws -> [LiveSet] {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
         return try db.read { db in
@@ -240,7 +254,7 @@ final class AppDatabase {
         }
     }
 
-    func fetchBackupLiveSets(forProjectPath projectPath: String) throws -> [LiveSet] {
+    func fetchBackupLiveSets() throws -> [LiveSet] {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
         return try db.read { db in
@@ -264,10 +278,10 @@ final class AppDatabase {
         }
     }
 
-    func deleteLiveSetsForProject(projectPath: String) throws {
+    func deleteAllLiveSets() throws {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
-        try db.write { db in
+        _ = try db.write { db in
             try LiveSet
                 .filter(Column("projectPath") == projectPath)
                 .deleteAll(db)
@@ -280,7 +294,7 @@ final class AppDatabase {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
         try db.write { db in
-            var t = track
+            let t = track
             try t.insert(db)
         }
     }
@@ -296,7 +310,7 @@ final class AppDatabase {
     func deleteTracksForLiveSet(liveSetPath: String) throws {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
-        try db.write { db in
+        _ = try db.write { db in
             try Track
                 .filter(Column("liveSetPath") == liveSetPath)
                 .deleteAll(db)
@@ -367,7 +381,7 @@ final class AppDatabase {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
         try db.write { db in
-            for var track in tracks {
+            for track in tracks {
                 try track.insert(db)
             }
         }
@@ -395,18 +409,9 @@ final class AppDatabase {
 
     // MARK: - Async Observation (use with for-await loops)
 
-    /// Observe projects - returns AsyncValueObservation for use with for-await
-    func observeProjects() -> ValueObservation<ValueReducers.Fetch<[Project]>> {
-        ValueObservation.tracking { db in
-            try Project
-                .order(Column("lastUpdated").desc)
-                .fetchAll(db)
-        }
-    }
-
-    /// Observe LiveSets for a project
-    func observeLiveSets(forProjectPath projectPath: String) -> ValueObservation<ValueReducers.Fetch<[LiveSet]>> {
-        ValueObservation.tracking { db in
+    /// Observe all LiveSets in this project
+    func observeLiveSets() -> ValueObservation<ValueReducers.Fetch<[LiveSet]>> {
+        ValueObservation.tracking { [projectPath] db in
             try LiveSet
                 .filter(Column("projectPath") == projectPath)
                 .order(Column("category"), Column("path"))
@@ -414,9 +419,9 @@ final class AppDatabase {
         }
     }
 
-    /// Observe main LiveSets for a project
-    func observeMainLiveSets(forProjectPath projectPath: String) -> ValueObservation<ValueReducers.Fetch<[LiveSet]>> {
-        ValueObservation.tracking { db in
+    /// Observe main LiveSets
+    func observeMainLiveSets() -> ValueObservation<ValueReducers.Fetch<[LiveSet]>> {
+        ValueObservation.tracking { [projectPath] db in
             try LiveSet
                 .filter(Column("projectPath") == projectPath)
                 .filter(Column("category") == LiveSetCategory.main.rawValue)
@@ -472,14 +477,11 @@ final class AppDatabase {
 
     enum DatabaseError: Error, LocalizedError {
         case notConnected
-        case setupFailed(String)
 
         var errorDescription: String? {
             switch self {
             case .notConnected:
-                return "Database not connected"
-            case .setupFailed(let reason):
-                return "Database setup failed: \(reason)"
+                return "Project database not connected"
             }
         }
     }

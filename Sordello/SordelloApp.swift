@@ -58,7 +58,6 @@ struct SordelloApp: App {
 
 /// Manages project opening and file access
 /// Uses per-project GRDB databases for persistence
-@MainActor
 @Observable
 final class ProjectManager {
     static let shared = ProjectManager()
@@ -206,7 +205,7 @@ final class ProjectManager {
         let accessing = folderUrl.startAccessingSecurityScopedResource()
 
         // Fix any _subproject files first
-        fixSubprojectFilenames(in: folderUrl)
+//        fixSubprojectFilenames(in: folderUrl)
 
         do {
             // Create or get the project database at .sordello/db/sordello.db
@@ -355,129 +354,119 @@ final class ProjectManager {
         parseAllLiveSetsInBackground(liveSetPaths: liveSetPaths, projectPath: project.path)
     }
 
-    /// Parse all LiveSets in background using parallel TaskGroup
+    /// Parse all LiveSets in background
     private func parseAllLiveSetsInBackground(liveSetPaths: [String], projectPath: String) {
-        // Get bookmark data on MainActor BEFORE entering background task
-        guard let bookmarkData = bookmarks[projectPath] else {
-            print("No bookmark found for project: \(projectPath)")
+        guard let bookmarkData = bookmarks[projectPath],
+              let projectDb = projectDatabases[projectPath] else {
+            print("No bookmark or database found for project: \(projectPath)")
             return
         }
 
         print("Starting parallel parsing of \(liveSetPaths.count) LiveSets...")
-        let startTime = Date()
 
         Task {
-            // Resolve bookmark ONCE for all files
-            var isStale = false
-            guard let folderUrl = try? URL(
-                resolvingBookmarkData: bookmarkData,
-                options: .withSecurityScope,
-                relativeTo: nil,
-                bookmarkDataIsStale: &isStale
-            ) else {
-                print("Failed to resolve bookmark for parsing")
-                return
-            }
-
-            guard folderUrl.startAccessingSecurityScopedResource() else {
-                print("Failed to access security-scoped resource")
-                return
-            }
-            defer { folderUrl.stopAccessingSecurityScopedResource() }
-
-            // Parse files in parallel
-            var completedCount = 0
-
-            await withTaskGroup(of: AlsParseResult.self) { group in
-                for path in liveSetPaths {
-                    group.addTask {
-                        await parseAlsFileInBackground(at: path)
-                    }
-                }
-
-                // Process each result as it completes
-                for await result in group {
-                    completedCount += 1
-
-                    // Skip failed parses
-                    guard result.errorMessage == nil else {
-                        print("[\(completedCount)/\(liveSetPaths.count)] Failed: \(URL(fileURLWithPath: result.path).lastPathComponent)")
-                        continue
-                    }
-
-                    // Write to project database on MainActor
-                    await MainActor.run {
-                        do {
-                            guard let projectDb = self.projectDatabases[projectPath] else { return }
-                            guard var liveSet = try projectDb.fetchLiveSet(path: result.path) else { return }
-                            guard !liveSet.isParsed else { return }
-
-                            // Update LiveSet with parsed data
-                            liveSet.liveVersion = result.liveVersion ?? "Unknown"
-                            liveSet.isParsed = true
-                            liveSet.lastUpdated = Date()
-
-                            // Create Track objects from parsed data
-                            var tracks: [Track] = []
-                            for parsedTrack in result.tracks {
-                                var track = Track(
-                                    trackId: parsedTrack.trackId,
-                                    name: parsedTrack.name,
-                                    type: parsedTrack.type,
-                                    parentGroupId: parsedTrack.parentGroupId
-                                )
-                                track.liveSetPath = liveSet.path
-                                track.sortIndex = parsedTrack.sortIndex
-                                track.color = parsedTrack.color
-                                track.isFrozen = parsedTrack.isFrozen
-                                track.trackDelay = parsedTrack.trackDelay
-                                track.isDelayInSamples = parsedTrack.isDelayInSamples
-
-                                if let routing = parsedTrack.audioInput {
-                                    track.audioInput = Track.RoutingInfo(target: routing.target, displayName: routing.displayName, channel: routing.channel)
-                                }
-                                if let routing = parsedTrack.audioOutput {
-                                    track.audioOutput = Track.RoutingInfo(target: routing.target, displayName: routing.displayName, channel: routing.channel)
-                                }
-                                if let routing = parsedTrack.midiInput {
-                                    track.midiInput = Track.RoutingInfo(target: routing.target, displayName: routing.displayName, channel: routing.channel)
-                                }
-                                if let routing = parsedTrack.midiOutput {
-                                    track.midiOutput = Track.RoutingInfo(target: routing.target, displayName: routing.displayName, channel: routing.channel)
-                                }
-
-                                tracks.append(track)
-                            }
-
-                            // Save LiveSet with all tracks
-                            try projectDb.saveLiveSetWithTracks(liveSet, tracks: tracks)
-
-                        } catch {
-                            print("Failed to save parsed LiveSet: \(error)")
-                        }
-                    }
-                }
-            }
-
-            print("Parsed \(completedCount)/\(liveSetPaths.count) files in \(Date().timeIntervalSince(startTime).formatted(.number.precision(.fractionLength(1))))s")
-
-            // Link tracks to subprojects
-            await MainActor.run {
-                self.accessFile(at: projectPath) { _ in
-                    do {
-                        guard let projectDb = self.projectDatabases[projectPath] else { return }
-                        let mainLiveSets = try projectDb.fetchMainLiveSets()
-                        for liveSet in mainLiveSets {
-                            self.linkTracksToSubprojects(liveSet: liveSet, projectPath: projectPath)
-                        }
-                        let totalTime = Date().timeIntervalSince(startTime)
-                        print("Finished background parsing all LiveSets in \(totalTime.formatted(.number.precision(.fractionLength(1))))s")
-                    } catch {
-                        print("Failed to link subprojects: \(error)")
-                    }
-                }
+            do {
+                try await parseAllLiveSetsInBackgroundImpl(
+                    liveSetPaths: liveSetPaths,
+                    projectPath: projectPath,
+                    bookmarkData: bookmarkData,
+                    projectDb: projectDb
+                )
+            } catch {
+                print("Background parsing failed: \(error)")
             }
         }
+    }
+
+    /// Background parsing implementation
+    @concurrent
+    private func parseAllLiveSetsInBackgroundImpl(
+        liveSetPaths: [String],
+        projectPath: String,
+        bookmarkData: Data,
+        projectDb: ProjectDatabase
+    ) async throws {
+        let startTime = Date()
+
+        // Resolve bookmark for security-scoped access
+        var isStale = false
+        guard let folderUrl = try? URL(
+            resolvingBookmarkData: bookmarkData,
+            options: .withSecurityScope,
+            relativeTo: nil,
+            bookmarkDataIsStale: &isStale
+        ) else {
+            print("Failed to resolve bookmark for parsing")
+            return
+        }
+
+        guard folderUrl.startAccessingSecurityScopedResource() else {
+            print("Failed to access security-scoped resource")
+            return
+        }
+        defer { folderUrl.stopAccessingSecurityScopedResource() }
+
+        // Parse and save each file
+        var completedCount = 0
+        let parser = AlsParser()
+
+        for path in liveSetPaths {
+            let result = await parser.parse(atPath: path)
+            completedCount += 1
+
+            guard result.success else {
+                print("[\(completedCount)/\(liveSetPaths.count)] Failed: \(URL(fileURLWithPath: path).lastPathComponent)")
+                continue
+            }
+
+            // Get existing LiveSet from database
+            guard var liveSet = try projectDb.fetchLiveSet(path: result.path) else { continue }
+            guard !liveSet.isParsed else { continue }
+
+            // Update LiveSet with parsed data
+            liveSet.liveVersion = result.liveVersion ?? "Unknown"
+            liveSet.isParsed = true
+            liveSet.lastUpdated = Date()
+
+            // Create Track objects
+            var tracks: [Track] = []
+            for parsedTrack in result.tracks {
+                var track = Track(
+                    trackId: parsedTrack.trackId,
+                    name: parsedTrack.name,
+                    type: parsedTrack.type,
+                    parentGroupId: parsedTrack.parentGroupId
+                )
+                track.liveSetPath = liveSet.path
+                track.sortIndex = parsedTrack.sortIndex
+                track.color = parsedTrack.color
+                track.isFrozen = parsedTrack.isFrozen
+                track.trackDelay = parsedTrack.trackDelay
+                track.isDelayInSamples = parsedTrack.isDelayInSamples
+                track.audioInput = parsedTrack.audioInput
+                track.audioOutput = parsedTrack.audioOutput
+                track.midiInput = parsedTrack.midiInput
+                track.midiOutput = parsedTrack.midiOutput
+                tracks.append(track)
+            }
+
+            // Save to database (GRDB is thread-safe)
+            try projectDb.saveLiveSetWithTracks(liveSet, tracks: tracks)
+        }
+
+        let elapsed = Date().timeIntervalSince(startTime)
+        print("Parsed \(completedCount)/\(liveSetPaths.count) files in \(elapsed.formatted(.number.precision(.fractionLength(1))))s")
+
+        // Link tracks to subprojects
+        let mainLiveSets = try projectDb.fetchMainLiveSets()
+        await MainActor.run {
+            for liveSet in mainLiveSets {
+                self.linkTracksToSubprojects(liveSet: liveSet, projectPath: projectPath)
+            }
+        }
+
+        let totalTime = Date().timeIntervalSince(startTime)
+        print("Finished background parsing in \(totalTime.formatted(.number.precision(.fractionLength(1))))s")
     }
 
     /// Internal parsing method
@@ -485,16 +474,17 @@ final class ProjectManager {
         let alsUrl = URL(fileURLWithPath: liveSet.path)
 
         let parser = AlsParser()
-        guard parser.loadFile(at: alsUrl) else {
-            print("Failed to parse Live Set \(liveSet.name): \(parser.errorMessage ?? "unknown error")")
+        let result = parser.parse(at: alsUrl)
+        guard result.success else {
+            print("Failed to parse Live Set \(liveSet.name): \(result.errorMessage ?? "unknown error")")
             return
         }
 
         // Parse tracks
-        let parsedTracks = parser.getTracks()
+        let parsedTracks = result.tracks
 
         var updatedLiveSet = liveSet
-        updatedLiveSet.liveVersion = parser.liveVersion ?? "Unknown"
+        updatedLiveSet.liveVersion = result.liveVersion ?? "Unknown"
         updatedLiveSet.isParsed = true
         updatedLiveSet.lastUpdated = Date()
 
@@ -571,50 +561,50 @@ final class ProjectManager {
     }
 
     /// Rename any _subproject files to .subproject (Live substitutes . with _ on Save As)
-    private func fixSubprojectFilenames(in folderUrl: URL) {
-        let fileManager = FileManager.default
-
-        guard let contents = try? fileManager.contentsOfDirectory(at: folderUrl, includingPropertiesForKeys: nil) else {
-            return
-        }
-
-        for fileUrl in contents {
-            let fileName = fileUrl.lastPathComponent
-
-            // Check for _subproject .als files
-            if fileName.hasPrefix("_subproject-") && fileName.hasSuffix(".als") {
-                let newFileName = "." + fileName.dropFirst() // Replace _ with .
-                let newUrl = folderUrl.appendingPathComponent(newFileName)
-
-                do {
-                    // Remove existing file if it exists (overwrite)
-                    if fileManager.fileExists(atPath: newUrl.path) {
-                        try fileManager.removeItem(at: newUrl)
-                        print("Removed existing: \(newFileName)")
-                    }
-
-                    try fileManager.moveItem(at: fileUrl, to: newUrl)
-                    print("Renamed: \(fileName) -> \(newFileName)")
-
-                    // Also rename the corresponding -meta.json file if it exists
-                    let oldMetaName = fileName.replacingOccurrences(of: ".als", with: "-meta.json")
-                    let newMetaName = newFileName.replacingOccurrences(of: ".als", with: "-meta.json")
-                    let oldMetaUrl = folderUrl.appendingPathComponent(oldMetaName)
-                    let newMetaUrl = folderUrl.appendingPathComponent(newMetaName)
-
-                    if fileManager.fileExists(atPath: oldMetaUrl.path) {
-                        if fileManager.fileExists(atPath: newMetaUrl.path) {
-                            try fileManager.removeItem(at: newMetaUrl)
-                        }
-                        try fileManager.moveItem(at: oldMetaUrl, to: newMetaUrl)
-                        print("Renamed: \(oldMetaName) -> \(newMetaName)")
-                    }
-                } catch {
-                    print("Failed to rename \(fileName): \(error.localizedDescription)")
-                }
-            }
-        }
-    }
+//    private func fixSubprojectFilenames(in folderUrl: URL) {
+//        let fileManager = FileManager.default
+//
+//        guard let contents = try? fileManager.contentsOfDirectory(at: folderUrl, includingPropertiesForKeys: nil) else {
+//            return
+//        }
+//
+//        for fileUrl in contents {
+//            let fileName = fileUrl.lastPathComponent
+//
+//            // Check for _subproject .als files
+//            if fileName.hasPrefix("_subproject-") && fileName.hasSuffix(".als") {
+//                let newFileName = "." + fileName.dropFirst() // Replace _ with .
+//                let newUrl = folderUrl.appendingPathComponent(newFileName)
+//
+//                do {
+//                    // Remove existing file if it exists (overwrite)
+//                    if fileManager.fileExists(atPath: newUrl.path) {
+//                        try fileManager.removeItem(at: newUrl)
+//                        print("Removed existing: \(newFileName)")
+//                    }
+//
+//                    try fileManager.moveItem(at: fileUrl, to: newUrl)
+//                    print("Renamed: \(fileName) -> \(newFileName)")
+//
+//                    // Also rename the corresponding -meta.json file if it exists
+//                    let oldMetaName = fileName.replacingOccurrences(of: ".als", with: "-meta.json")
+//                    let newMetaName = newFileName.replacingOccurrences(of: ".als", with: "-meta.json")
+//                    let oldMetaUrl = folderUrl.appendingPathComponent(oldMetaName)
+//                    let newMetaUrl = folderUrl.appendingPathComponent(newMetaName)
+//
+//                    if fileManager.fileExists(atPath: oldMetaUrl.path) {
+//                        if fileManager.fileExists(atPath: newMetaUrl.path) {
+//                            try fileManager.removeItem(at: newMetaUrl)
+//                        }
+//                        try fileManager.moveItem(at: oldMetaUrl, to: newMetaUrl)
+//                        print("Renamed: \(oldMetaName) -> \(newMetaName)")
+//                    }
+//                } catch {
+//                    print("Failed to rename \(fileName): \(error.localizedDescription)")
+//                }
+//            }
+//        }
+//    }
 
     /// Load comment from companion -comment.txt file
     private func loadComment(for alsUrl: URL) -> String? {
@@ -697,7 +687,7 @@ final class ProjectManager {
     private func reloadProject(folderPath: String) {
         accessFile(at: folderPath) { folderUrl in
             // Fix filenames first
-            self.fixSubprojectFilenames(in: folderUrl)
+//            self.fixSubprojectFilenames(in: folderUrl)
 
             do {
                 guard let projectDb = self.projectDatabases[folderPath],
@@ -866,38 +856,39 @@ final class ProjectManager {
 
     /// Extract a group as a subproject (uses bookmark for folder access)
     func extractSubproject(from liveSetPath: String, groupId: Int, groupName: String, sourceLiveSetName: String, to outputPath: String, projectPath: String, completion: @escaping (String?) -> Void) {
-        Task.detached { [weak self] in
-            await MainActor.run {
-                self?.accessFile(at: projectPath) { folderUrl in
-                    let extractor = AlsExtractor()
-                    let result = extractor.extractGroup(from: liveSetPath, groupId: groupId, to: outputPath)
-
-                    if result.success, let outputPath = result.outputPath {
-                        // Save metadata JSON file
-                        let baseName = URL(fileURLWithPath: outputPath).deletingPathExtension().lastPathComponent
-                        let metadataFileName = "\(baseName)-meta.json"
-                        let metadataUrl = folderUrl.appendingPathComponent(metadataFileName)
-
-                        let metadata: [String: Any] = [
-                            "sourceLiveSetName": sourceLiveSetName,
-                            "sourceGroupId": groupId,
-                            "sourceGroupName": groupName,
-                            "extractedAt": ISO8601DateFormatter().string(from: Date())
-                        ]
-
-                        if let jsonData = try? JSONSerialization.data(withJSONObject: metadata, options: .prettyPrinted) {
-                            try? jsonData.write(to: metadataUrl)
-                            print("Saved metadata: \(metadataFileName)")
-                        }
-
-                        completion(outputPath)
-                    } else {
-                        print("Extraction failed: \(result.error ?? "unknown error")")
-                        completion(nil)
-                    }
-                }
-            }
-        }
+//        Task.detached { [weak self] in
+//            guard let self = self else { return }
+//            await MainActor.run { [self] in
+//                self.accessFile(at: projectPath) { folderUrl in
+//                    let extractor = AlsExtractor()
+//                    let result = extractor.extractGroup(from: liveSetPath, groupId: groupId, to: outputPath)
+//
+//                    if result.success, let outputPath = result.outputPath {
+//                        // Save metadata JSON file
+//                        let baseName = URL(fileURLWithPath: outputPath).deletingPathExtension().lastPathComponent
+//                        let metadataFileName = "\(baseName)-meta.json"
+//                        let metadataUrl = folderUrl.appendingPathComponent(metadataFileName)
+//
+//                        let metadata: [String: Any] = [
+//                            "sourceLiveSetName": sourceLiveSetName,
+//                            "sourceGroupId": groupId,
+//                            "sourceGroupName": groupName,
+//                            "extractedAt": ISO8601DateFormatter().string(from: Date())
+//                        ]
+//
+//                        if let jsonData = try? JSONSerialization.data(withJSONObject: metadata, options: .prettyPrinted) {
+//                            try? jsonData.write(to: metadataUrl)
+//                            print("Saved metadata: \(metadataFileName)")
+//                        }
+//
+//                        completion(outputPath)
+//                    } else {
+//                        print("Extraction failed: \(result.error ?? "unknown error")")
+//                        completion(nil)
+//                    }
+//                }
+//            }
+//        }
     }
 
     /// Rescan a project folder to update the live sets list

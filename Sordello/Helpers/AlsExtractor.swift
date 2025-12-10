@@ -9,8 +9,8 @@ import Foundation
 import Compression
 
 /// Extracts a group track and its children to a new .als file
-class AlsExtractor {
-    private(set) var errorMessage: String?
+/// Pure struct - no mutable state, safe to use on any thread
+struct AlsExtractor {
 
     struct ExtractionResult {
         let success: Bool
@@ -136,7 +136,7 @@ class AlsExtractor {
         print("  Including \(returnTracks.count) return track(s)")
 
         // Remove all tracks from the original Tracks element
-        while let child = tracksElement.children?.first {
+        while tracksElement.children?.first != nil {
             tracksElement.removeChild(at: 0)
         }
 
@@ -174,7 +174,7 @@ class AlsExtractor {
         )
     }
 
-    // MARK: - Helper Methods
+    // MARK: - Private Helper Methods
 
     private func getTrackId(_ element: XMLElement) -> Int {
         if let idAttr = element.attribute(forName: "Id")?.stringValue {
@@ -247,7 +247,7 @@ extension Data {
         // Header (10 bytes) + deflated data + CRC32 (4 bytes) + original size (4 bytes)
 
         // Gzip header
-        var header = Data([
+        let header = Data([
             0x1f, 0x8b,       // Magic number
             0x08,             // Compression method (deflate)
             0x00,             // Flags
