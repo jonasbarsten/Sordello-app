@@ -15,7 +15,6 @@ struct LiveSetMainRow: View {
 
     @State private var showVersionDialog = false
     @State private var versionComment = ""
-    @State private var isParsed = false
 
     private var isSelected: Bool {
         UIState.shared.selectedLiveSetPath == liveSet.path
@@ -52,7 +51,7 @@ struct LiveSetMainRow: View {
             Spacer()
 
             // Show spinner while parsing
-            if !isParsed {
+            if !liveSet.isParsed {
                 ProgressView()
                     .controlSize(.small)
             }
@@ -95,9 +94,6 @@ struct LiveSetMainRow: View {
             Button("Cancel", role: .cancel) { }
         } message: {
             Text("Add an optional comment to describe this version.")
-        }
-        .onAppear {
-            isParsed = liveSet.isParsed
         }
     }
 }
