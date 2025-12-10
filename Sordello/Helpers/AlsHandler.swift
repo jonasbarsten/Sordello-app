@@ -60,48 +60,18 @@ nonisolated struct AlsHandler: FileHandler {
 
     // MARK: - Background Parsing
 
-    /// Parse a single LiveSet by path (for background use)
+    /// Parse a single .als file (pure parsing, no DB operations)
+    /// Returns the parse result which is Sendable
     @concurrent
-    static func parseSingle(path: String, db: ProjectDatabase) async throws {
-        // Use autoreleasepool to release memory after each parse
-        let parseResult: AlsParseResult = autoreleasepool {
+    private static func parseAlsFile(at path: String) async -> AlsParseResult {
+        autoreleasepool {
             let parser = AlsParser()
             return parser.parse(atPath: path)
         }
-
-        guard parseResult.success else {
-            print("AlsHandler: Failed: \(URL(fileURLWithPath: path).lastPathComponent)")
-            return
-        }
-
-        // Get existing LiveSet from database
-        guard var liveSet = try db.fetchLiveSet(path: parseResult.path) else {
-            print("AlsHandler: LiveSet not found in database: \(path)")
-            return
-        }
-
-        guard !liveSet.isParsed else {
-            print("AlsHandler: Already parsed: \(path)")
-            return
-        }
-
-        // Update LiveSet with parsed data
-        liveSet.liveVersion = parseResult.liveVersion ?? "Unknown"
-        liveSet.isParsed = true
-        liveSet.lastUpdated = Date()
-
-        let tracks = createTracks(from: parseResult.tracks, liveSetPath: liveSet.path)
-
-        // Save to database (GRDB is thread-safe)
-        try db.saveLiveSetWithTracks(liveSet, tracks: tracks)
-        print("AlsHandler: Parsed: \(URL(fileURLWithPath: path).lastPathComponent)")
     }
 
-    /// Maximum concurrent parsing operations to limit memory usage
-    private static let maxConcurrentParses = 4
-
     /// Parse all LiveSets in parallel using security-scoped bookmark
-    /// Uses TaskGroup with limited concurrency to control memory usage
+    /// Uses TaskGroup - parsing returns Sendable results, DB writes happen sequentially
     static func parseAllInBackground(
         paths: [String],
         bookmarkData: Data,
@@ -125,28 +95,59 @@ nonisolated struct AlsHandler: FileHandler {
         }
 
         Task {
-            await parseWithLimitedConcurrency(paths: paths, db: db)
+            await parseWithTaskGroup(paths: paths, db: db)
             folderUrl.stopAccessingSecurityScopedResource()
         }
     }
 
-    /// Parse paths with limited concurrency using chunked TaskGroup
-    private static func parseWithLimitedConcurrency(paths: [String], db: ProjectDatabase) async {
-        // Process in chunks to limit concurrent memory usage
-        let chunks = paths.chunked(into: maxConcurrentParses)
+    /// Parse paths using TaskGroup - returns results, then saves to DB
+    private static func parseWithTaskGroup(paths: [String], db: ProjectDatabase) async {
+        var completedCount = 0
 
-        for chunk in chunks {
-            await withTaskGroup(of: Void.self) { group in
-                for path in chunk {
-                    let pathCopy = path  // Explicit copy for sendability
-                    group.addTask {
-                        try? await parseSingle(path: pathCopy, db: db)
+        // TaskGroup returns AlsParseResult (Sendable), DB writes happen in for-await loop
+        await withTaskGroup(of: AlsParseResult.self) { group in
+            // Add all parsing tasks - only captures path (String is Sendable)
+            for path in paths {
+                group.addTask {
+                    await parseAlsFile(at: path)
+                }
+            }
+
+            // Process results as they complete (sequential, safe to use db here)
+            for await result in group {
+                completedCount += 1
+
+                guard result.success else {
+                    print("[\(completedCount)/\(paths.count)] Failed: \(URL(fileURLWithPath: result.path).lastPathComponent)")
+                    continue
+                }
+
+                // Save to database (outside the addTask closure, so db access is safe)
+                do {
+                    guard var liveSet = try db.fetchLiveSet(path: result.path) else {
+                        print("[\(completedCount)/\(paths.count)] Not in DB: \(URL(fileURLWithPath: result.path).lastPathComponent)")
+                        continue
                     }
+
+                    guard !liveSet.isParsed else {
+                        continue
+                    }
+
+                    liveSet.liveVersion = result.liveVersion ?? "Unknown"
+                    liveSet.isParsed = true
+                    liveSet.lastUpdated = Date()
+
+                    let tracks = createTracks(from: result.tracks, liveSetPath: liveSet.path)
+                    try db.saveLiveSetWithTracks(liveSet, tracks: tracks)
+
+                    print("[\(completedCount)/\(paths.count)] Parsed: \(URL(fileURLWithPath: result.path).lastPathComponent)")
+                } catch {
+                    print("[\(completedCount)/\(paths.count)] DB error: \(error)")
                 }
             }
         }
 
-        print("AlsHandler: Completed parsing \(paths.count) LiveSets")
+        print("AlsHandler: Completed parsing \(completedCount)/\(paths.count) LiveSets")
     }
 
     // MARK: - Private Helpers
@@ -177,16 +178,5 @@ nonisolated struct AlsHandler: FileHandler {
         }
 
         return tracks
-    }
-}
-
-// MARK: - Array Extension
-
-private extension Array {
-    /// Split array into chunks of specified size
-    nonisolated func chunked(into size: Int) -> [[Element]] {
-        stride(from: 0, to: count, by: size).map {
-            Array(self[$0..<Swift.min($0 + size, count)])
-        }
     }
 }
