@@ -12,4 +12,9 @@ nonisolated struct K {
         static let chars: [Character] = Array("abcdefghijklmnopqrstuvwxyz")
         static let base = 26
     }
+
+    nonisolated struct parsing {
+        /// Maximum concurrent ALS parsing tasks to limit memory usage
+        static let maxConcurrentAlsParsers = 4
+    }
 }

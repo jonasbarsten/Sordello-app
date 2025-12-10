@@ -70,9 +70,6 @@ nonisolated struct AlsHandler: FileHandler {
         }
     }
 
-    /// Maximum concurrent parsing tasks to limit memory usage
-    private static let maxConcurrentTasks = 4
-
     /// Parse all LiveSets in parallel using security-scoped bookmark
     /// Uses TaskGroup with limited concurrency - parsing returns Sendable results
     static func parseAllInBackground(
@@ -110,7 +107,7 @@ nonisolated struct AlsHandler: FileHandler {
         let totalCount = paths.count
 
         // Process in chunks to limit concurrent memory usage
-        for chunk in paths.chunked(into: maxConcurrentTasks) {
+        for chunk in paths.chunked(into: K.parsing.maxConcurrentAlsParsers) {
             await withTaskGroup(of: AlsParseResult.self) { group in
                 // Add tasks for this chunk only
                 for path in chunk {
