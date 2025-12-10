@@ -24,7 +24,7 @@ struct TrackRow: View {
     @FocusState private var isNameFieldFocused: Bool
 
     private var isSelected: Bool {
-        UIState.shared.selectedTrackId == track.trackId
+        UIState.shared.selectedTrack?.trackId == track.trackId
     }
 
     var body: some View {
@@ -143,7 +143,7 @@ struct TrackRow: View {
                         loadChildren()
                     }
                 } else {
-                    UIState.shared.selectedTrackId = track.trackId
+                    UIState.shared.selectedTrack = track
                 }
             }
             .contextMenu {
@@ -197,7 +197,7 @@ struct TrackRow: View {
 
     private func navigateToSubproject(path: String) {
         UIState.shared.selectedLiveSetPath = path
-        UIState.shared.selectedTrackId = nil
+        UIState.shared.selectedTrack = nil
     }
 
     private func extractAsSubproject() {

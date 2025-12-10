@@ -11,12 +11,30 @@ struct LiveSetListView: View {
     let projectPath: String
     @Query<MainLiveSetsRequest> var mainLiveSets: [LiveSet]
     @Query<VersionLiveSetsRequest> var allVersions: [LiveSet]
+    @Query<SubprojectLiveSetsRequest> var subprojects: [LiveSet]
+    @Query<BackupLiveSetsRequest> var backups: [LiveSet]
     @State private var expandedPaths: Set<String> = []
 
     init(projectPath: String) {
         self.projectPath = projectPath
         _mainLiveSets = Query(constant: MainLiveSetsRequest(projectPath: projectPath))
         _allVersions = Query(constant: VersionLiveSetsRequest(projectPath: projectPath))
+        _subprojects = Query(constant: SubprojectLiveSetsRequest(projectPath: projectPath))
+        _backups = Query(constant: BackupLiveSetsRequest(projectPath: projectPath))
+    }
+
+    /// All LiveSets combined for lookup
+    private var allLiveSets: [LiveSet] {
+        mainLiveSets + allVersions + subprojects + backups
+    }
+
+    /// Find a LiveSet by path (handles "original-" prefix)
+    private func findLiveSet(path: String?) -> LiveSet? {
+        guard let path = path else { return nil }
+        let actualPath = path.hasPrefix("original-")
+            ? String(path.dropFirst("original-".count))
+            : path
+        return allLiveSets.first { $0.path == actualPath }
     }
 
     private var sortedMainLiveSets: [LiveSet] {
@@ -32,7 +50,9 @@ struct LiveSetListView: View {
     var body: some View {
         List(selection: Binding(
             get: { UIState.shared.selectedLiveSetPath },
-            set: { UIState.shared.selectedLiveSetPath = $0 }
+            set: { path in
+                UIState.shared.selectedLiveSet = findLiveSet(path: path)
+            }
         )) {
             // Main Live Sets section
             if !sortedMainLiveSets.isEmpty {

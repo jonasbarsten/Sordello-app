@@ -329,20 +329,3 @@ struct ConnectedDevice: Codable, Identifiable, FetchableRecord, PersistableRecor
         request(for: ConnectedDevice.project)
     }
 }
-
-// MARK: - App State (Non-persisted UI state)
-
-/// UI state that doesn't need persistence - kept in memory
-@Observable
-final class UIState {
-    static let shared = UIState()
-
-    var selectedProjectPath: String?
-    var selectedLiveSetPath: String?
-    var selectedTrackId: Int?
-    var isInspectorVisible: Bool = false
-    var liveSetSortOrder: SortOrder = .ascending
-    var expandedLiveSets: Set<String> = []
-
-    private init() {}
-}

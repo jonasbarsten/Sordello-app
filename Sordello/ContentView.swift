@@ -58,6 +58,31 @@ struct ContentView: View {
                 }
             }
         }
+        .inspector(isPresented: Binding(
+            get: { UIState.shared.isInspectorVisible },
+            set: { UIState.shared.isInspectorVisible = $0 }
+        )) {
+            InspectorContent()
+                .inspectorColumnWidth(min: 250, ideal: 300, max: 400)
+        }
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    ProjectManager.shared.openProject()
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .help("Open Project...")
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    UIState.shared.isInspectorVisible.toggle()
+                } label: {
+                    Image(systemName: UIState.shared.isInspectorVisible ? "info.circle.fill" : "info.circle")
+                }
+                .help(UIState.shared.isInspectorVisible ? "Hide Inspector" : "Show Inspector")
+            }
+        }
         .frame(minWidth: 900, minHeight: 500)
     }
 }

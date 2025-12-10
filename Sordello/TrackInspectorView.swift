@@ -227,7 +227,7 @@ struct TrackInspectorView: View {
 
     private func navigateToSubproject(path: String) {
         UIState.shared.selectedLiveSetPath = path
-        UIState.shared.selectedTrackId = nil
+        UIState.shared.selectedTrack = nil
     }
 
     private func iconForTrackType(_ type: TrackType) -> String {
@@ -626,14 +626,9 @@ struct LiveSetInspectorView: View {
             let mainSets = try projectDb.fetchMainLiveSets()
             guard let source = mainSets.first(where: { $0.name == sourceName }) else { return }
 
-            UIState.shared.selectedLiveSetPath = source.path
-
-            // Select the source group track
-            if let groupId = liveSet.sourceGroupId {
-                UIState.shared.selectedTrackId = groupId
-            } else {
-                UIState.shared.selectedTrackId = nil
-            }
+            UIState.shared.selectedLiveSet = source
+            UIState.shared.selectedTrack = nil
+            // TODO: Select the source group track by fetching it from DB
         } catch {
             print("Error navigating to source: \(error)")
         }
