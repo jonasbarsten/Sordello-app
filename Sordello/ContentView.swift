@@ -9,6 +9,9 @@ import SwiftUI
 import GRDBQuery
 
 struct ContentView: View {
+    
+    // Updated via .onChangeOf
+    @State private var inspectorIsVisible = UIState.shared.isInspectorVisible
 
     var body: some View {
         NavigationSplitView {
@@ -45,10 +48,10 @@ struct ContentView: View {
                     Image(systemName: "music.note.list")
                         .font(.system(size: 64))
                         .foregroundColor(.secondary)
-                    Text("No Live Set selected")
+                    Text("No project selected")
                         .font(.title2)
                         .foregroundColor(.secondary)
-                    Text("Open an Ableton Live project to get started")
+                    Text("Open a project to get started")
                         .font(.caption)
                         .foregroundColor(.secondary)
                     Button("Open Project...") {
@@ -58,10 +61,7 @@ struct ContentView: View {
                 }
             }
         }
-        .inspector(isPresented: Binding(
-            get: { UIState.shared.isInspectorVisible },
-            set: { UIState.shared.isInspectorVisible = $0 }
-        )) {
+        .inspector(isPresented: $inspectorIsVisible) {
             InspectorContent()
                 .inspectorColumnWidth(min: 250, ideal: 300, max: 400)
         }
@@ -78,11 +78,14 @@ struct ContentView: View {
                 Button {
                     UIState.shared.isInspectorVisible.toggle()
                 } label: {
-                    Image(systemName: UIState.shared.isInspectorVisible ? "info.circle.fill" : "info.circle")
+                    Image(systemName: inspectorIsVisible ? "info.circle.fill" : "info.circle")
                 }
-                .help(UIState.shared.isInspectorVisible ? "Hide Inspector" : "Show Inspector")
+                .help(inspectorIsVisible ? "Hide Inspector" : "Show Inspector")
             }
         }
+        .onChange(of: UIState.shared.isInspectorVisible, { _, newValue in
+            inspectorIsVisible = newValue
+        })
         .frame(minWidth: 900, minHeight: 500)
     }
 }

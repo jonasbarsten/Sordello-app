@@ -10,7 +10,7 @@ import Foundation
 /// UI state that doesn't need persistence - kept in memory
 @Observable
 final class UIState {
-    static let shared = UIState()
+     static let shared = UIState()
 
     // MARK: - Selection State (Objects)
 

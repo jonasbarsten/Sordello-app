@@ -81,6 +81,12 @@ struct LiveSetMainRow: View {
 
             Divider()
 
+            Button("Reveal in Finder") {
+                NSWorkspace.shared.selectFile(liveSet.path, inFileViewerRootedAtPath: "")
+            }
+
+            Divider()
+
             Button("Create Version...") {
                 versionComment = ""
                 showVersionDialog = true

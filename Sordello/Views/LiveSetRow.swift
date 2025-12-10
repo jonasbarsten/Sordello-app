@@ -40,6 +40,12 @@ struct LiveSetRow: View {
             Button("Open in Ableton Live") {
                 NSWorkspace.shared.open(URL(fileURLWithPath: liveSet.path))
             }
+
+            Divider()
+
+            Button("Reveal in Finder") {
+                NSWorkspace.shared.selectFile(liveSet.path, inFileViewerRootedAtPath: "")
+            }
         }
     }
 
