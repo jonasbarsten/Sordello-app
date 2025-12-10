@@ -14,6 +14,7 @@ struct LiveSetListView: View {
     @Query<SubprojectLiveSetsRequest> var subprojects: [LiveSet]
     @Query<BackupLiveSetsRequest> var backups: [LiveSet]
     @State private var expandedPaths: Set<String> = []
+    @State private var selection: String?
 
     init(projectPath: String) {
         self.projectPath = projectPath
@@ -21,6 +22,7 @@ struct LiveSetListView: View {
         _allVersions = Query(constant: VersionLiveSetsRequest(projectPath: projectPath))
         _subprojects = Query(constant: SubprojectLiveSetsRequest(projectPath: projectPath))
         _backups = Query(constant: BackupLiveSetsRequest(projectPath: projectPath))
+        _selection = State(initialValue: UIState.shared.selectedLiveSetPath)
     }
 
     /// All LiveSets combined for lookup
@@ -48,12 +50,7 @@ struct LiveSetListView: View {
     }
 
     var body: some View {
-        List(selection: Binding(
-            get: { UIState.shared.selectedLiveSetPath },
-            set: { path in
-                UIState.shared.selectedLiveSet = findLiveSet(path: path)
-            }
-        )) {
+        List(selection: $selection) {
             // Main Live Sets section
             if !sortedMainLiveSets.isEmpty {
                 Section {
@@ -104,6 +101,15 @@ struct LiveSetListView: View {
             BackupsSection(projectPath: projectPath)
         }
         .navigationSplitViewColumnWidth(min: 200, ideal: 280)
+        .onChange(of: selection) { _, newPath in
+            UIState.shared.selectedLiveSet = findLiveSet(path: newPath)
+        }
+        .onChange(of: UIState.shared.selectedLiveSetPath) { _, newPath in
+            // Sync external changes (e.g., from navigation) back to local selection
+            if selection != newPath {
+                selection = newPath
+            }
+        }
     }
 
     private func versionsFor(_ liveSet: LiveSet) -> [LiveSet] {
