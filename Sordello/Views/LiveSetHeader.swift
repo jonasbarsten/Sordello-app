@@ -25,7 +25,7 @@ struct LiveSetHeader: View {
 
     /// Parse subproject filename to extract metadata
     private var parsedSubprojectInfo: (projectName: String, groupName: String, timestamp: String)? {
-        guard liveSet.category == .subproject else { return nil }
+        guard liveSet.category == .liveSetTrackVersion else { return nil }
 
         let name = liveSet.name
         guard name.hasPrefix(".subproject-") else { return nil }
@@ -66,7 +66,7 @@ struct LiveSetHeader: View {
     var body: some View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
-                if liveSet.category == .subproject {
+                if liveSet.category == .liveSetTrackVersion {
                     // Subproject header
                     HStack(spacing: 6) {
                         Image(systemName: "doc.badge.gearshape.fill")
@@ -289,5 +289,5 @@ struct LiveSetHeader: View {
 }
 
 #Preview("Subproject") {
-    LiveSetHeader(liveSet: LiveSet(path: "/test/.subproject-My Song-Drums-2025-12-09T14-30-00.als", category: .subproject))
+    LiveSetHeader(liveSet: LiveSet(path: "/test/.subproject-My Song-Drums-2025-12-09T14-30-00.als", category: .liveSetTrackVersion))
 }

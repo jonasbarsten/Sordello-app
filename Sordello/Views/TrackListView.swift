@@ -9,7 +9,7 @@ import GRDBQuery
 
 struct TrackListView: View {
     let liveSet: LiveSet
-    @Query<RootTracksRequest> var rootTracks: [Track]
+    @Query<RootTracksRequest> var rootTracks: [LiveSetTrack]
 
     init(liveSet: LiveSet) {
         self.liveSet = liveSet

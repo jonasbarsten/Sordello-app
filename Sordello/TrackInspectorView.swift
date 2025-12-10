@@ -12,7 +12,7 @@ import GRDB
 
 /// Inspector panel showing detailed track information
 struct TrackInspectorView: View {
-    let track: Track
+    let track: LiveSetTrack
     let liveSetPath: String
 
     var body: some View {
@@ -303,7 +303,7 @@ struct PropertyRow: View {
 
 struct RoutingRow: View {
     let label: String
-    let routing: Track.RoutingInfo
+    let routing: LiveSetTrack.RoutingInfo
     let icon: String
 
     var body: some View {
@@ -359,7 +359,7 @@ struct LiveSetInspectorView: View {
                     versioningSection
                 }
 
-                if liveSet.category == .subproject, liveSet.hasMetadata {
+                if liveSet.category == .liveSetTrackVersion, liveSet.hasMetadata {
                     Divider()
                     subprojectSection
                 }
@@ -671,19 +671,19 @@ struct LiveSetInspectorView: View {
         return formatter.string(from: date)
     }
 
-    private func iconForCategory(_ category: LiveSetCategory) -> String {
+    private func iconForCategory(_ category: FileCategory) -> String {
         switch category {
         case .main: return "doc.fill"
-        case .subproject: return "doc.badge.gearshape.fill"
+        case .liveSetTrackVersion: return "doc.badge.gearshape.fill"
         case .version: return "clock.arrow.circlepath"
         case .backup: return "clock.fill"
         }
     }
 
-    private func colorForCategory(_ category: LiveSetCategory) -> Color {
+    private func colorForCategory(_ category: FileCategory) -> Color {
         switch category {
         case .main: return .blue
-        case .subproject: return .purple
+        case .liveSetTrackVersion: return .purple
         case .version: return .orange
         case .backup: return .gray
         }
@@ -692,7 +692,7 @@ struct LiveSetInspectorView: View {
 
 #Preview("Track Inspector") {
     TrackInspectorView(
-        track: Track(
+        track: LiveSetTrack(
             trackId: 15,
             name: "Test Track",
             type: .audio,

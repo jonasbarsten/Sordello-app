@@ -19,7 +19,7 @@ struct LiveSetRow: View {
                     .lineLimit(1)
 
                 // Show source info for subprojects with metadata
-                if liveSet.category == .subproject, liveSet.hasMetadata {
+                if liveSet.category == .liveSetTrackVersion, liveSet.hasMetadata {
                     Text("From: \(liveSet.sourceLiveSetName ?? "") → \(liveSet.sourceGroupName ?? "")")
                         .font(.caption2)
                         .foregroundColor(.secondary)
@@ -43,19 +43,19 @@ struct LiveSetRow: View {
         }
     }
 
-    private func iconForCategory(_ category: LiveSetCategory) -> String {
+    private func iconForCategory(_ category: FileCategory) -> String {
         switch category {
         case .main: return "doc.fill"
-        case .subproject: return "doc.badge.gearshape.fill"
+        case .liveSetTrackVersion: return "doc.badge.gearshape.fill"
         case .version: return "clock.arrow.circlepath"
         case .backup: return "clock.fill"
         }
     }
 
-    private func colorForCategory(_ category: LiveSetCategory) -> Color {
+    private func colorForCategory(_ category: FileCategory) -> Color {
         switch category {
         case .main: return .blue
-        case .subproject: return .purple
+        case .liveSetTrackVersion: return .purple
         case .version: return .orange
         case .backup: return .gray
         }
@@ -67,7 +67,7 @@ struct LiveSetRow: View {
 }
 
 #Preview("Subproject") {
-    var subproject = LiveSet(path: "/test/.subproject-My Song-Drums-2025-12-09T14-30-00.als", category: .subproject)
+    var subproject = LiveSet(path: "/test/.subproject-My Song-Drums-2025-12-09T14-30-00.als", category: .liveSetTrackVersion)
     subproject.sourceLiveSetName = "My Song"
     subproject.sourceGroupName = "Drums"
     subproject.sourceGroupId = 15

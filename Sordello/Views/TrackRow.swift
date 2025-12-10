@@ -8,7 +8,7 @@ import AppKit
 import GRDB
 
 struct TrackRow: View {
-    var track: Track
+    var track: LiveSetTrack
     let liveSetPath: String
     let depth: Int
     @State private var isExpanded = false
@@ -19,7 +19,7 @@ struct TrackRow: View {
     @State private var extractedPath: String?
     @State private var isEditingName = false
     @State private var editingText = ""
-    @State private var children: [Track] = []
+    @State private var children: [LiveSetTrack] = []
     @State private var observationTask: Task<Void, Never>?
     @FocusState private var isNameFieldFocused: Bool
 
@@ -319,7 +319,7 @@ struct TrackRow: View {
 
 #Preview("Audio Track") {
     TrackRow(
-        track: Track(trackId: 1, name: "Drums", type: .audio, parentGroupId: nil),
+        track: LiveSetTrack(trackId: 1, name: "Drums", type: .audio, parentGroupId: nil),
         liveSetPath: "/test/My Song.als",
         depth: 0
     )
@@ -327,7 +327,7 @@ struct TrackRow: View {
 
 #Preview("MIDI Track") {
     TrackRow(
-        track: Track(trackId: 2, name: "Synth Lead", type: .midi, parentGroupId: nil),
+        track: LiveSetTrack(trackId: 2, name: "Synth Lead", type: .midi, parentGroupId: nil),
         liveSetPath: "/test/My Song.als",
         depth: 0
     )
@@ -335,7 +335,7 @@ struct TrackRow: View {
 
 #Preview("Group Track") {
     TrackRow(
-        track: Track(trackId: 3, name: "Drums Group", type: .group, parentGroupId: nil),
+        track: LiveSetTrack(trackId: 3, name: "Drums Group", type: .group, parentGroupId: nil),
         liveSetPath: "/test/My Song.als",
         depth: 0
     )
@@ -343,7 +343,7 @@ struct TrackRow: View {
 
 #Preview("Nested Track") {
     TrackRow(
-        track: Track(trackId: 4, name: "Kick", type: .audio, parentGroupId: 3),
+        track: LiveSetTrack(trackId: 4, name: "Kick", type: .audio, parentGroupId: 3),
         liveSetPath: "/test/My Song.als",
         depth: 1
     )

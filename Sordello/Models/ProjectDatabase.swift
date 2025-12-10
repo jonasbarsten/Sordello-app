@@ -237,7 +237,7 @@ nonisolated class ProjectDatabase {
         return try db.read { db in
             try LiveSet
                 .filter(Column("projectPath") == projectPath)
-                .filter(Column("category") == LiveSetCategory.main.rawValue)
+                .filter(Column("category") == FileCategory.main.rawValue)
                 .order(Column("path"))
                 .fetchAll(db)
         }
@@ -249,7 +249,7 @@ nonisolated class ProjectDatabase {
         return try db.read { db in
             try LiveSet
                 .filter(Column("projectPath") == projectPath)
-                .filter(Column("category") == LiveSetCategory.subproject.rawValue)
+                .filter(Column("category") == FileCategory.liveSetTrackVersion.rawValue)
                 .fetchAll(db)
         }
     }
@@ -260,7 +260,7 @@ nonisolated class ProjectDatabase {
         return try db.read { db in
             try LiveSet
                 .filter(Column("projectPath") == projectPath)
-                .filter(Column("category") == LiveSetCategory.backup.rawValue)
+                .filter(Column("category") == FileCategory.backup.rawValue)
                 .order(Column("backupTimestamp").desc)
                 .fetchAll(db)
         }
@@ -271,7 +271,7 @@ nonisolated class ProjectDatabase {
 
         return try db.read { db in
             try LiveSet
-                .filter(Column("category") == LiveSetCategory.version.rawValue)
+                .filter(Column("category") == FileCategory.version.rawValue)
                 .filter(Column("parentLiveSetPath") == parentPath)
                 .order(Column("path").desc)
                 .fetchAll(db)
@@ -290,7 +290,7 @@ nonisolated class ProjectDatabase {
 
     // MARK: - Track Operations
 
-    func insertTrack(_ track: Track) throws {
+    func insertTrack(_ track: LiveSetTrack) throws {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
         try db.write { db in
@@ -299,7 +299,7 @@ nonisolated class ProjectDatabase {
         }
     }
 
-    func updateTrack(_ track: Track) throws {
+    func updateTrack(_ track: LiveSetTrack) throws {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
         try db.write { db in
@@ -311,28 +311,28 @@ nonisolated class ProjectDatabase {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
         _ = try db.write { db in
-            try Track
+            try LiveSetTrack
                 .filter(Column("liveSetPath") == liveSetPath)
                 .deleteAll(db)
         }
     }
 
-    func fetchTracks(forLiveSetPath liveSetPath: String) throws -> [Track] {
+    func fetchTracks(forLiveSetPath liveSetPath: String) throws -> [LiveSetTrack] {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
         return try db.read { db in
-            try Track
+            try LiveSetTrack
                 .filter(Column("liveSetPath") == liveSetPath)
                 .order(Column("sortIndex"))
                 .fetchAll(db)
         }
     }
 
-    func fetchRootTracks(forLiveSetPath liveSetPath: String) throws -> [Track] {
+    func fetchRootTracks(forLiveSetPath liveSetPath: String) throws -> [LiveSetTrack] {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
         return try db.read { db in
-            try Track
+            try LiveSetTrack
                 .filter(Column("liveSetPath") == liveSetPath)
                 .filter(Column("parentGroupId") == nil)
                 .order(Column("sortIndex"))
@@ -340,11 +340,11 @@ nonisolated class ProjectDatabase {
         }
     }
 
-    func fetchChildTracks(forLiveSetPath liveSetPath: String, parentGroupId: Int) throws -> [Track] {
+    func fetchChildTracks(forLiveSetPath liveSetPath: String, parentGroupId: Int) throws -> [LiveSetTrack] {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
         return try db.read { db in
-            try Track
+            try LiveSetTrack
                 .filter(Column("liveSetPath") == liveSetPath)
                 .filter(Column("parentGroupId") == parentGroupId)
                 .order(Column("sortIndex"))
@@ -352,22 +352,22 @@ nonisolated class ProjectDatabase {
         }
     }
 
-    func fetchTrack(liveSetPath: String, trackId: Int) throws -> Track? {
+    func fetchTrack(liveSetPath: String, trackId: Int) throws -> LiveSetTrack? {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
         return try db.read { db in
-            try Track
+            try LiveSetTrack
                 .filter(Column("liveSetPath") == liveSetPath)
                 .filter(Column("trackId") == trackId)
                 .fetchOne(db)
         }
     }
 
-    func fetchGroupTracks(forLiveSetPath liveSetPath: String) throws -> [Track] {
+    func fetchGroupTracks(forLiveSetPath liveSetPath: String) throws -> [LiveSetTrack] {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
         return try db.read { db in
-            try Track
+            try LiveSetTrack
                 .filter(Column("liveSetPath") == liveSetPath)
                 .filter(Column("type") == TrackType.group.rawValue)
                 .order(Column("sortIndex"))
@@ -377,7 +377,7 @@ nonisolated class ProjectDatabase {
 
     // MARK: - Batch Operations
 
-    func insertTracks(_ tracks: [Track]) throws {
+    func insertTracks(_ tracks: [LiveSetTrack]) throws {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
         try db.write { db in
@@ -387,7 +387,7 @@ nonisolated class ProjectDatabase {
         }
     }
 
-    func saveLiveSetWithTracks(_ liveSet: LiveSet, tracks: [Track]) throws {
+    func saveLiveSetWithTracks(_ liveSet: LiveSet, tracks: [LiveSetTrack]) throws {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
         try db.write { db in
@@ -395,7 +395,7 @@ nonisolated class ProjectDatabase {
             try liveSet.save(db)
 
             // Delete existing tracks
-            try Track
+            try LiveSetTrack
                 .filter(Column("liveSetPath") == liveSet.path)
                 .deleteAll(db)
 
@@ -424,16 +424,16 @@ nonisolated class ProjectDatabase {
         ValueObservation.tracking { [projectPath] db in
             try LiveSet
                 .filter(Column("projectPath") == projectPath)
-                .filter(Column("category") == LiveSetCategory.main.rawValue)
+                .filter(Column("category") == FileCategory.main.rawValue)
                 .order(Column("path"))
                 .fetchAll(db)
         }
     }
 
     /// Observe tracks for a LiveSet
-    func observeTracks(forLiveSetPath liveSetPath: String) -> ValueObservation<ValueReducers.Fetch<[Track]>> {
+    func observeTracks(forLiveSetPath liveSetPath: String) -> ValueObservation<ValueReducers.Fetch<[LiveSetTrack]>> {
         ValueObservation.tracking { db in
-            try Track
+            try LiveSetTrack
                 .filter(Column("liveSetPath") == liveSetPath)
                 .order(Column("sortIndex"))
                 .fetchAll(db)
@@ -441,9 +441,9 @@ nonisolated class ProjectDatabase {
     }
 
     /// Observe root tracks for a LiveSet
-    func observeRootTracks(forLiveSetPath liveSetPath: String) -> ValueObservation<ValueReducers.Fetch<[Track]>> {
+    func observeRootTracks(forLiveSetPath liveSetPath: String) -> ValueObservation<ValueReducers.Fetch<[LiveSetTrack]>> {
         ValueObservation.tracking { db in
-            try Track
+            try LiveSetTrack
                 .filter(Column("liveSetPath") == liveSetPath)
                 .filter(Column("parentGroupId") == nil)
                 .order(Column("sortIndex"))
@@ -452,9 +452,9 @@ nonisolated class ProjectDatabase {
     }
 
     /// Observe child tracks of a group
-    func observeChildTracks(forLiveSetPath liveSetPath: String, parentGroupId: Int) -> ValueObservation<ValueReducers.Fetch<[Track]>> {
+    func observeChildTracks(forLiveSetPath liveSetPath: String, parentGroupId: Int) -> ValueObservation<ValueReducers.Fetch<[LiveSetTrack]>> {
         ValueObservation.tracking { db in
-            try Track
+            try LiveSetTrack
                 .filter(Column("liveSetPath") == liveSetPath)
                 .filter(Column("parentGroupId") == parentGroupId)
                 .order(Column("sortIndex"))
@@ -466,7 +466,7 @@ nonisolated class ProjectDatabase {
     func observeVersionLiveSets(forParentPath parentPath: String) -> ValueObservation<ValueReducers.Fetch<[LiveSet]>> {
         ValueObservation.tracking { db in
             try LiveSet
-                .filter(Column("category") == LiveSetCategory.version.rawValue)
+                .filter(Column("category") == FileCategory.version.rawValue)
                 .filter(Column("parentLiveSetPath") == parentPath)
                 .order(Column("path").desc)
                 .fetchAll(db)

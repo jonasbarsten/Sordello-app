@@ -124,7 +124,7 @@ struct ConcurrencyExample: View {
         
         
         let parser = AlsParser()
-        parser.parse(at: URL(string: "https://example.com")!)
+        _ = parser.parse(at: URL(string: "https://example.com")!)
         
         // We can not access non-static stuff from the Main thread here
         // Like for example this:
@@ -133,7 +133,7 @@ struct ConcurrencyExample: View {
         
         // But we can do this:
         let someStruct = ConcurrenctTestStruct()
-        _ = await someStruct.someStupidFunctionNotAsync()
+        _ = someStruct.someStupidFunctionNotAsync()
         _ = await someStruct.someStupidFunction()
         
         

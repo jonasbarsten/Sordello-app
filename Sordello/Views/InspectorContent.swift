@@ -8,7 +8,7 @@ import GRDB
 
 struct InspectorContent: View {
     let liveSet: LiveSet
-    @State private var selectedTrack: Track?
+    @State private var selectedTrack: LiveSetTrack?
     @State private var observationTask: Task<Void, Never>?
 
     var body: some View {
@@ -42,7 +42,7 @@ struct InspectorContent: View {
         observationTask?.cancel()
         observationTask = Task {
             let observation = ValueObservation.tracking { db in
-                try Track
+                try LiveSetTrack
                     .filter(Column("liveSetPath") == liveSet.path)
                     .filter(Column("trackId") == trackId)
                     .fetchOne(db)

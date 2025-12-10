@@ -12,7 +12,7 @@ import Compression
 /// nonisolated: Used with AlsParser from background threads
 nonisolated struct AlsParseResult {
     let path: String
-    let tracks: [Track]
+    let tracks: [LiveSetTrack]
     let liveVersion: String?
     let errorMessage: String?
 
@@ -74,14 +74,14 @@ nonisolated struct AlsParser {
 
     // MARK: - Private Parsing Methods
 
-    private func parseTracks(from xmlDocument: XMLDocument) -> [Track] {
+    private func parseTracks(from xmlDocument: XMLDocument) -> [LiveSetTrack] {
         guard let root = xmlDocument.rootElement(),
               let liveSet = root.elements(forName: "LiveSet").first,
               let tracksElement = liveSet.elements(forName: "Tracks").first else {
             return []
         }
 
-        var tracks: [Track] = []
+        var tracks: [LiveSetTrack] = []
         let trackTypes = ["MidiTrack", "AudioTrack", "GroupTrack", "ReturnTrack"]
 
         // Collect track elements
@@ -106,7 +106,7 @@ nonisolated struct AlsParser {
         return tracks
     }
 
-    private func parseTrack(_ element: XMLElement, type: String) -> Track {
+    private func parseTrack(_ element: XMLElement, type: String) -> LiveSetTrack {
         let id = Int(element.attribute(forName: "Id")?.stringValue ?? "-1") ?? -1
         let name = getTrackName(element)
         let groupId = getTrackGroupId(element)
@@ -120,7 +120,7 @@ nonisolated struct AlsParser {
         default: trackType = .audio
         }
 
-        var track = Track(
+        var track = LiveSetTrack(
             trackId: id,
             name: name,
             type: trackType,
@@ -173,7 +173,7 @@ nonisolated struct AlsParser {
         return (value, isSampleBased)
     }
 
-    private func getRouting(from deviceChain: XMLElement, name: String) -> Track.RoutingInfo? {
+    private func getRouting(from deviceChain: XMLElement, name: String) -> LiveSetTrack.RoutingInfo? {
         guard let routingElement = deviceChain.elements(forName: name).first else { return nil }
 
         let target = routingElement.elements(forName: "Target").first?
@@ -185,6 +185,6 @@ nonisolated struct AlsParser {
 
         if target.isEmpty || target.contains("/None") { return nil }
 
-        return Track.RoutingInfo(target: target, displayName: displayName, channel: channel)
+        return LiveSetTrack.RoutingInfo(target: target, displayName: displayName, channel: channel)
     }
 }

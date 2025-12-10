@@ -11,14 +11,6 @@ import GRDB
 
 // MARK: - Enums
 
-/// Category of a Live Set within a project
-enum LiveSetCategory: String, Codable, CaseIterable, DatabaseValueConvertible {
-    case main       // Main .als files in root
-    case subproject // Files starting with .subproject-
-    case version    // Files starting with .version-
-    case backup     // Files in Backup/ folder
-}
-
 /// Track type in Ableton
 enum TrackType: String, Codable, DatabaseValueConvertible {
     case audio = "AudioTrack"
@@ -69,8 +61,9 @@ struct Project: Codable, Identifiable, FetchableRecord, PersistableRecord, Senda
 }
 
 /// Represents an individual .als file (Live Set)
-struct LiveSet: Codable, Identifiable, FetchableRecord, PersistableRecord, Sendable {
+nonisolated struct LiveSet: Codable, Identifiable, FetchableRecord, PersistableRecord, Sendable, ProjectFile {
     static let databaseTableName = "live_sets"
+    static let fileExtension = "als"
 
     /// Primary key - file path
     var id: String { path }
@@ -79,7 +72,7 @@ struct LiveSet: Codable, Identifiable, FetchableRecord, PersistableRecord, Senda
     /// Foreign key to project
     var projectPath: String?
 
-    var category: LiveSetCategory
+    var category: FileCategory
     var liveVersion: String
     var comment: String?
     var lastUpdated: Date
@@ -115,7 +108,7 @@ struct LiveSet: Codable, Identifiable, FetchableRecord, PersistableRecord, Senda
         sourceLiveSetName != nil && sourceGroupId != nil
     }
 
-    init(path: String, category: LiveSetCategory) {
+    init(path: String, category: FileCategory) {
         self.path = path
         self.category = category
         self.liveVersion = "Unknown"
@@ -150,19 +143,19 @@ struct LiveSet: Codable, Identifiable, FetchableRecord, PersistableRecord, Senda
 
     // MARK: - Associations
     static let project = belongsTo(Project.self)
-    static let tracks = hasMany(Track.self)
+    static let tracks = hasMany(LiveSetTrack.self)
 
     var project: QueryInterfaceRequest<Project> {
         request(for: LiveSet.project)
     }
 
-    var tracks: QueryInterfaceRequest<Track> {
+    var tracks: QueryInterfaceRequest<LiveSetTrack> {
         request(for: LiveSet.tracks)
     }
 }
 
-/// Represents a track in an Ableton project
-struct Track: Codable, Identifiable, FetchableRecord, PersistableRecord, Sendable {
+/// Represents a track in an Ableton Live Set
+struct LiveSetTrack: Codable, Identifiable, FetchableRecord, PersistableRecord, Sendable {
     static let databaseTableName = "tracks"
 
     /// Compound primary key: liveSetPath + trackId
@@ -299,7 +292,7 @@ struct Track: Codable, Identifiable, FetchableRecord, PersistableRecord, Sendabl
     static let liveSet = belongsTo(LiveSet.self)
 
     var liveSet: QueryInterfaceRequest<LiveSet> {
-        request(for: Track.liveSet)
+        request(for: LiveSetTrack.liveSet)
     }
 }
 
