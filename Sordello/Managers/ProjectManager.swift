@@ -351,6 +351,62 @@ final class ProjectManager {
         }
     }
 
+    /// Create a version of a track (extracts it to a new .als file)
+    func createLiveSetTrackVersion(liveSetPath: String, trackId: Int, trackName: String) {
+        // Get project path from the LiveSet
+        guard let projectPath = UIState.shared.selectedProjectPath,
+              let vc = versionControls[projectPath],
+              let projectDb = projectDatabases[projectPath] else { return }
+
+        // Generate output path
+        let outputPath = vc.liveSetTrackVersionPath(for: liveSetPath, trackId: trackId)
+        let liveSetName = URL(fileURLWithPath: liveSetPath).deletingPathExtension().lastPathComponent
+
+        // Insert a placeholder immediately so it appears in UI
+        var placeholder = LiveSet(path: outputPath, category: .liveSetTrackVersion)
+        placeholder.projectPath = projectPath
+        placeholder.parentLiveSetPath = liveSetPath
+        placeholder.sourceLiveSetName = liveSetName
+        placeholder.sourceGroupId = trackId
+        placeholder.sourceGroupName = trackName
+        placeholder.extractedAt = Date()
+        placeholder.isParsed = false
+        try? projectDb.insertLiveSet(placeholder)
+
+        // Extract in background
+        Task {
+            // Access the project folder for file operations
+            guard let bookmarkData = BookmarkManager.shared.getBookmarkData(for: projectPath),
+                  let resolved = BookmarkManager.resolveBookmark(bookmarkData) else {
+                print("Failed to access project folder")
+                return
+            }
+            defer {
+                if resolved.needsStopAccess {
+                    resolved.url.stopAccessingSecurityScopedResource()
+                }
+            }
+
+            // Create parent directories
+            let outputUrl = URL(fileURLWithPath: outputPath)
+            let parentDir = outputUrl.deletingLastPathComponent()
+            try? FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
+
+            // Extract the track
+            let extractor = AlsExtractor()
+            let result = extractor.extractTrack(from: liveSetPath, trackId: trackId, to: outputPath)
+
+            if result.success {
+                print("Created track version: \(outputUrl.lastPathComponent) (\(result.tracksExtracted) tracks)")
+                self.reloadProject(folderPath: projectPath)
+            } else {
+                print("Failed to create track version: \(result.error ?? "unknown error")")
+                // Remove placeholder on failure
+                try? projectDb.deleteLiveSet(path: outputPath)
+            }
+        }
+    }
+
     /// Save a comment for a LiveSet
     func saveComment(for liveSet: LiveSet, comment: String) {
         guard let projectPath = liveSet.projectPath else { return }

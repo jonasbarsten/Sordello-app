@@ -49,15 +49,24 @@ final class VersionControl {
             .appending("/versions/\(versionName).\(fileExtension)")
     }
 
-//    /// Create a version of a file by copying it (synchronous - for use within bookmark access)
-//    /// - Parameter filePath: Path to the file to version
-//    /// - Returns: The path where the version was created
-//    @discardableResult
-//    func createVersion(of filePath: String) throws -> String {
-//        let destinationPath = versionPath(for: filePath)
-//        try createCopy(of: filePath, to: destinationPath)
-//        return destinationPath
-//    }
+    /// Generate the path for a new track version (extracted track as standalone .als)
+    /// - Parameters:
+    ///   - liveSetPath: Path to the source LiveSet
+    ///   - trackId: The track ID being extracted
+    /// - Returns: The path where the track version would be created
+    func liveSetTrackVersionPath(for liveSetPath: String, trackId: Int) -> String {
+        let fileUrl = URL(fileURLWithPath: liveSetPath)
+        let fileExtension = fileUrl.pathExtension
+        let liveSetName = fileUrl.deletingPathExtension().lastPathComponent
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = K.dateFormat.timestamp
+        let versionName = formatter.string(from: Date())
+
+        return (sordelloPath as NSString)
+            .appendingPathComponent(liveSetName)
+            .appending("/liveSetTracks/\(trackId)/\(versionName).\(fileExtension)")
+    }
 
     /// Copy a file synchronously (assumes caller has bookmark access)
     nonisolated func createCopy(of filePath: String, to destinationPath: String) throws {

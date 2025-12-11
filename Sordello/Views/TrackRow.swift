@@ -159,8 +159,16 @@ struct TrackRow: View {
                     }
                 }
 
+                Divider()
+                Button("Create Version") {
+                    ProjectManager.shared.createLiveSetTrackVersion(
+                        liveSetPath: liveSetPath,
+                        trackId: track.trackId,
+                        trackName: track.name
+                    )
+                }
+
                 if track.isGroup {
-                    Divider()
                     Button("Extract as Subproject") {
                         extractAsSubproject()
                     }

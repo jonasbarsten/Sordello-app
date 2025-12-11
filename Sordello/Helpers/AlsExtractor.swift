@@ -174,6 +174,170 @@ struct AlsExtractor {
         )
     }
 
+    /// Extract any track (audio, MIDI, or group) from an .als file to a new file
+    /// For groups: includes all nested tracks
+    /// For audio/MIDI: just that single track
+    func extractTrack(from inputPath: String, trackId: Int, to outputPath: String) -> ExtractionResult {
+        // Read and decompress the input file
+        let inputUrl = URL(fileURLWithPath: inputPath)
+        guard let compressedData = try? Data(contentsOf: inputUrl) else {
+            return ExtractionResult(success: false, outputPath: nil, tracksExtracted: 0, error: "Failed to read input file")
+        }
+
+        guard let xmlData = compressedData.gunzip() else {
+            return ExtractionResult(success: false, outputPath: nil, tracksExtracted: 0, error: "Failed to decompress file")
+        }
+
+        guard let xmlString = String(data: xmlData, encoding: .utf8) else {
+            return ExtractionResult(success: false, outputPath: nil, tracksExtracted: 0, error: "Failed to decode XML as UTF-8")
+        }
+
+        // Parse the XML
+        let xmlDoc: XMLDocument
+        do {
+            xmlDoc = try XMLDocument(xmlString: xmlString, options: [.nodePreserveAll])
+        } catch {
+            return ExtractionResult(success: false, outputPath: nil, tracksExtracted: 0, error: "Failed to parse XML: \(error.localizedDescription)")
+        }
+
+        // Find the structure
+        guard let root = xmlDoc.rootElement(),
+              root.name == "Ableton",
+              let liveSet = root.elements(forName: "LiveSet").first,
+              let tracksElement = liveSet.elements(forName: "Tracks").first else {
+            return ExtractionResult(success: false, outputPath: nil, tracksExtracted: 0, error: "Invalid .als structure")
+        }
+
+        let trackTypes = ["MidiTrack", "AudioTrack", "GroupTrack", "ReturnTrack"]
+
+        // Get all track elements
+        var allTrackElements: [XMLElement] = []
+        for child in tracksElement.children ?? [] {
+            if let element = child as? XMLElement,
+               let tagName = element.name,
+               trackTypes.contains(tagName) {
+                allTrackElements.append(element)
+            }
+        }
+
+        // Find the target track
+        var targetTrackElement: XMLElement?
+        var targetTrackType: String?
+        for element in allTrackElements {
+            if let idAttr = element.attribute(forName: "Id")?.stringValue,
+               Int(idAttr) == trackId {
+                targetTrackElement = element
+                targetTrackType = element.name
+                break
+            }
+        }
+
+        guard let targetTrack = targetTrackElement,
+              let trackType = targetTrackType else {
+            return ExtractionResult(success: false, outputPath: nil, tracksExtracted: 0, error: "Track with ID \(trackId) not found")
+        }
+
+        let trackName = getTrackName(targetTrack)
+        print("Extracting track: \"\(trackName)\" (ID: \(trackId), Type: \(trackType))")
+
+        var tracksToInclude: [XMLElement] = []
+        var returnTracks: [XMLElement] = []
+
+        // Collect return tracks
+        for element in allTrackElements {
+            if element.name == "ReturnTrack" {
+                returnTracks.append(element)
+            }
+        }
+
+        if trackType == "GroupTrack" {
+            // For groups: include the group and all nested tracks
+            var groupIdsToInclude = Set<Int>([trackId])
+
+            // Keep scanning until we find no new nested groups
+            var foundNew = true
+            while foundNew {
+                foundNew = false
+                for element in allTrackElements {
+                    if element.name == "GroupTrack" {
+                        let nestedId = getTrackId(element)
+                        if groupIdsToInclude.contains(nestedId) { continue }
+
+                        let parentId = getTrackGroupId(element)
+                        if groupIdsToInclude.contains(parentId) {
+                            groupIdsToInclude.insert(nestedId)
+                            foundNew = true
+                            print("  Found nested group: \"\(getTrackName(element))\" (ID: \(nestedId))")
+                        }
+                    }
+                }
+            }
+
+            // Set the main group track to root level
+            setTrackGroupId(targetTrack, newGroupId: -1)
+            tracksToInclude.append(targetTrack)
+            print("  Including: \(trackName) (GroupTrack, ID: \(trackId))")
+
+            // Add all child tracks
+            for element in allTrackElements {
+                guard let tagName = element.name, tagName != "ReturnTrack" else { continue }
+                if element === targetTrack { continue }
+
+                let trackGroupId = getTrackGroupId(element)
+                if groupIdsToInclude.contains(trackGroupId) {
+                    let childId = getTrackId(element)
+                    let childName = getTrackName(element)
+                    print("  Including: \(childName) (\(tagName), ID: \(childId))")
+                    tracksToInclude.append(element)
+                }
+            }
+        } else {
+            // For audio/MIDI tracks: just include that single track at root level
+            setTrackGroupId(targetTrack, newGroupId: -1)
+            tracksToInclude.append(targetTrack)
+            print("  Including: \(trackName) (\(trackType), ID: \(trackId))")
+        }
+
+        print("  Including \(returnTracks.count) return track(s)")
+
+        // Remove all tracks from the original Tracks element
+        while tracksElement.children?.first != nil {
+            tracksElement.removeChild(at: 0)
+        }
+
+        // Add tracks in order: target track(s), return tracks
+        for track in tracksToInclude {
+            tracksElement.addChild(track.copy() as! XMLNode)
+        }
+        for track in returnTracks {
+            tracksElement.addChild(track.copy() as! XMLNode)
+        }
+
+        // Get the modified XML string
+        let newXmlString = xmlDoc.xmlString(options: [.nodePrettyPrint])
+
+        // Compress to gzip
+        guard let xmlBytes = newXmlString.data(using: .utf8),
+              let compressedOutput = xmlBytes.gzip() else {
+            return ExtractionResult(success: false, outputPath: nil, tracksExtracted: 0, error: "Failed to compress output")
+        }
+
+        // Write to output file
+        let outputUrl = URL(fileURLWithPath: outputPath)
+        do {
+            try compressedOutput.write(to: outputUrl)
+        } catch {
+            return ExtractionResult(success: false, outputPath: nil, tracksExtracted: 0, error: "Failed to write output file: \(error.localizedDescription)")
+        }
+
+        return ExtractionResult(
+            success: true,
+            outputPath: outputPath,
+            tracksExtracted: tracksToInclude.count,
+            error: nil
+        )
+    }
+
     // MARK: - Private Helper Methods
 
     private func getTrackId(_ element: XMLElement) -> Int {

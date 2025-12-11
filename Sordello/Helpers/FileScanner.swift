@@ -88,6 +88,31 @@ struct FileScanner {
                     liveSet.fileModificationDate = getFileModificationDate(for: versionUrl)
                     try db.insertLiveSet(liveSet)
                 }
+
+                // Check for liveSetTracks subdirectory
+                let liveSetTracksUrl = itemUrl.appendingPathComponent("liveSetTracks")
+                if let trackIdDirs = try? fileManager.contentsOfDirectory(at: liveSetTracksUrl, includingPropertiesForKeys: nil) {
+                    for trackIdDir in trackIdDirs {
+                        // Each subdirectory is named with the trackId
+                        var isTrackDir: ObjCBool = false
+                        guard fileManager.fileExists(atPath: trackIdDir.path, isDirectory: &isTrackDir),
+                              isTrackDir.boolValue,
+                              let trackId = Int(trackIdDir.lastPathComponent) else { continue }
+
+                        // Scan for .als files in this track directory
+                        if let trackVersionFiles = try? fileManager.contentsOfDirectory(at: trackIdDir, includingPropertiesForKeys: nil) {
+                            for trackVersionUrl in trackVersionFiles where trackVersionUrl.pathExtension.lowercased() == "als" {
+                                var liveSet = LiveSet(path: trackVersionUrl.path, category: .liveSetTrackVersion)
+                                liveSet.projectPath = project.path
+                                liveSet.parentLiveSetPath = parentLiveSet.path
+                                liveSet.sourceLiveSetName = parentName
+                                liveSet.sourceGroupId = trackId
+                                liveSet.fileModificationDate = getFileModificationDate(for: trackVersionUrl)
+                                try db.insertLiveSet(liveSet)
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -254,6 +279,51 @@ struct FileScanner {
                         try db.insertLiveSet(liveSet)
                         newLiveSets.append(liveSet)
                         print("FileScanner: New version file: \(versionUrl.lastPathComponent)")
+                    }
+                }
+
+                // Check for liveSetTracks subdirectory
+                let liveSetTracksUrl = itemUrl.appendingPathComponent("liveSetTracks")
+                if let trackIdDirs = try? fileManager.contentsOfDirectory(at: liveSetTracksUrl, includingPropertiesForKeys: nil) {
+                    for trackIdDir in trackIdDirs {
+                        // Each subdirectory is named with the trackId
+                        var isTrackDir: ObjCBool = false
+                        guard fileManager.fileExists(atPath: trackIdDir.path, isDirectory: &isTrackDir),
+                              isTrackDir.boolValue,
+                              let trackId = Int(trackIdDir.lastPathComponent) else { continue }
+
+                        // Scan for .als files in this track directory
+                        if let trackVersionFiles = try? fileManager.contentsOfDirectory(at: trackIdDir, includingPropertiesForKeys: [.contentModificationDateKey]) {
+                            for trackVersionUrl in trackVersionFiles where trackVersionUrl.pathExtension.lowercased() == "als" {
+                                let filePath = trackVersionUrl.path
+                                currentFilePaths.insert(filePath)
+
+                                let currentModDate = getFileModificationDate(for: trackVersionUrl)
+
+                                if var existing = existingByPath[filePath] {
+                                    // Check if file was modified
+                                    if let storedDate = existing.fileModificationDate,
+                                       let currentDate = currentModDate,
+                                       currentDate.timeIntervalSince(storedDate) > 1.0 {
+                                        existing.fileModificationDate = currentDate
+                                        try db.updateLiveSet(existing)
+                                        changedLiveSets.append(existing)
+                                        print("FileScanner: Track version file changed: \(existing.name)")
+                                    }
+                                } else {
+                                    // New track version file
+                                    var liveSet = LiveSet(path: filePath, category: .liveSetTrackVersion)
+                                    liveSet.projectPath = project.path
+                                    liveSet.parentLiveSetPath = parentLiveSet?.path
+                                    liveSet.sourceLiveSetName = parentName
+                                    liveSet.sourceGroupId = trackId
+                                    liveSet.fileModificationDate = currentModDate
+                                    try db.insertLiveSet(liveSet)
+                                    newLiveSets.append(liveSet)
+                                    print("FileScanner: New track version file: \(trackVersionUrl.lastPathComponent)")
+                                }
+                            }
+                        }
                     }
                 }
             }
