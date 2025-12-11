@@ -12,6 +12,7 @@ struct LiveSetListView: View {
     @Query<MainLiveSetsRequest> var mainLiveSets: [LiveSet]
     @Query<VersionLiveSetsRequest> var allVersions: [LiveSet]
     @Query<SubprojectLiveSetsRequest> var subprojects: [LiveSet]
+    
     @Query<BackupLiveSetsRequest> var backups: [LiveSet]
     @State private var expandedPaths: Set<String> = []
     @State private var selection: String?
@@ -49,6 +50,15 @@ struct LiveSetListView: View {
         }
     }
 
+    /// Versions whose parent LiveSet no longer exists
+    private var orphanVersions: [LiveSet] {
+        let mainPaths = Set(mainLiveSets.map { $0.path })
+        return allVersions.filter { version in
+            guard let parentPath = version.parentLiveSetPath else { return true }
+            return !mainPaths.contains(parentPath)
+        }
+    }
+
     var body: some View {
         List(selection: $selection) {
             // Main Live Sets section
@@ -65,6 +75,9 @@ struct LiveSetListView: View {
                             versionCount: versions.count,
                             isExpanded: isExpanded,
                             onToggleExpand: hasVersions ? { toggleExpanded(liveSet.path) } : nil,
+                            onSelect: {
+                                selection = liveSet.path  // Immediate visual update
+                            },
                             latestVersionPath: versions.first?.path
                         )
                         .tag(liveSet.path)
@@ -99,15 +112,21 @@ struct LiveSetListView: View {
 
             SubprojectsSection(projectPath: projectPath)
             BackupsSection(projectPath: projectPath)
+
+            // Orphan versions (parent LiveSet deleted)
+            if !orphanVersions.isEmpty {
+                Section("Orphan Versions") {
+                    ForEach(orphanVersions, id: \.path) { version in
+                        VersionRow(version: version)
+                            .tag(version.path)
+                    }
+                }
+            }
         }
         .navigationSplitViewColumnWidth(min: 200, ideal: 280)
-        .onChange(of: selection) { _, newPath in
-            UIState.shared.selectedLiveSet = findLiveSet(path: newPath)
-        }
-        .onChange(of: UIState.shared.selectedLiveSetPath) { _, newPath in
-            // Sync external changes (e.g., from navigation) back to local selection
-            if selection != newPath {
-                selection = newPath
+        .onChange(of: selection) { _, newSelection in
+            Task { @MainActor in
+                UIState.shared.selectedLiveSet = findLiveSet(path: newSelection)
             }
         }
     }

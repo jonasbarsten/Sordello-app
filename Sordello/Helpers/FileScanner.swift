@@ -46,47 +46,46 @@ struct FileScanner {
 
         var mainLiveSetPaths: [String: LiveSet] = [:]
 
-        // Scan root folder for .als files
+        // Scan root folder for .als files (skip hidden files)
         if let rootContents = try? fileManager.contentsOfDirectory(at: folderUrl, includingPropertiesForKeys: nil) {
             for fileUrl in rootContents where fileUrl.pathExtension.lowercased() == "als" {
                 let fileName = fileUrl.lastPathComponent
 
-                if fileName.hasPrefix(".subproject-") {
-                    var liveSet = LiveSet(path: fileUrl.path, category: .liveSetTrackVersion)
-                    liveSet.projectPath = project.path
-                    loadSubprojectMetadata(for: &liveSet, folderUrl: folderUrl)
-                    liveSet.comment = loadComment(for: fileUrl)
-                    liveSet.fileModificationDate = getFileModificationDate(for: fileUrl)
-                    try db.insertLiveSet(liveSet)
+                // Skip hidden files (versions are in .sordello/)
+                guard !fileName.hasPrefix(".") else { continue }
 
-                } else if fileName.hasPrefix(".version-") {
-                    // Version files are handled after main LiveSets
-                    continue
-
-                } else {
-                    var liveSet = LiveSet(path: fileUrl.path, category: .main)
-                    liveSet.projectPath = project.path
-                    liveSet.comment = loadComment(for: fileUrl)
-                    liveSet.fileModificationDate = getFileModificationDate(for: fileUrl)
-                    try db.insertLiveSet(liveSet)
-                    mainLiveSetPaths[liveSet.name] = liveSet
-                }
+                var liveSet = LiveSet(path: fileUrl.path, category: .main)
+                liveSet.projectPath = project.path
+                liveSet.comment = loadComment(for: fileUrl)
+                liveSet.fileModificationDate = getFileModificationDate(for: fileUrl)
+                try db.insertLiveSet(liveSet)
+                mainLiveSetPaths[liveSet.name] = liveSet
             }
         }
 
-        // Scan for version files and link them to parents
-        if let rootContents = try? fileManager.contentsOfDirectory(at: folderUrl, includingPropertiesForKeys: nil) {
-            for fileUrl in rootContents where fileUrl.pathExtension.lowercased() == "als" {
-                let fileName = fileUrl.lastPathComponent
+        // Scan .sordello/{fileName}/versions/ for version files
+        let sordelloUrl = folderUrl.appendingPathComponent(".sordello")
+        if let sordelloContents = try? fileManager.contentsOfDirectory(at: sordelloUrl, includingPropertiesForKeys: nil) {
+            for itemUrl in sordelloContents {
+                // Skip non-directories and special folders like "db"
+                var isDir: ObjCBool = false
+                guard fileManager.fileExists(atPath: itemUrl.path, isDirectory: &isDir),
+                      isDir.boolValue,
+                      itemUrl.lastPathComponent != "db" else { continue }
 
-                if fileName.hasPrefix(".version-"),
-                   let parentName = extractParentName(from: fileName),
-                   let parentLiveSet = mainLiveSetPaths[parentName] {
-                    var liveSet = LiveSet(path: fileUrl.path, category: .version)
+                // Check for versions subdirectory
+                let versionsUrl = itemUrl.appendingPathComponent("versions")
+                guard let versionFiles = try? fileManager.contentsOfDirectory(at: versionsUrl, includingPropertiesForKeys: nil) else { continue }
+
+                // Find the parent LiveSet by matching the folder name
+                let parentName = itemUrl.lastPathComponent
+                guard let parentLiveSet = mainLiveSetPaths[parentName] else { continue }
+
+                for versionUrl in versionFiles where versionUrl.pathExtension.lowercased() == "als" {
+                    var liveSet = LiveSet(path: versionUrl.path, category: .version)
                     liveSet.projectPath = project.path
                     liveSet.parentLiveSetPath = parentLiveSet.path
-                    liveSet.comment = loadComment(for: fileUrl)
-                    liveSet.fileModificationDate = getFileModificationDate(for: fileUrl)
+                    liveSet.fileModificationDate = getFileModificationDate(for: versionUrl)
                     try db.insertLiveSet(liveSet)
                 }
             }
@@ -117,8 +116,16 @@ struct FileScanner {
 
     // MARK: - Incremental Update
 
-    /// Incrementally update LiveSets - returns changed and new LiveSets that need re-parsing
-    static func incrementalUpdate(in folderUrl: URL, for project: Project, db: ProjectDatabase) throws -> [LiveSet] {
+    /// Result of incremental update
+    struct IncrementalUpdateResult {
+        let changed: [LiveSet]  // Files that were modified (for auto-versioning)
+        let new: [LiveSet]      // New files added
+
+        var allToReparse: [LiveSet] { changed + new }
+    }
+
+    /// Incrementally update LiveSets - returns changed and new LiveSets separately
+    static func incrementalUpdate(in folderUrl: URL, for project: Project, db: ProjectDatabase) throws -> IncrementalUpdateResult {
         let fileManager = FileManager.default
 
         // Build map of existing LiveSets by path
@@ -133,10 +140,14 @@ struct FileScanner {
         var changedLiveSets: [LiveSet] = []
         var newLiveSets: [LiveSet] = []
 
-        // Scan root folder
+        // Scan root folder (skip hidden files)
         if let rootContents = try? fileManager.contentsOfDirectory(at: folderUrl, includingPropertiesForKeys: [.contentModificationDateKey]) {
             for fileUrl in rootContents where fileUrl.pathExtension.lowercased() == "als" {
                 let fileName = fileUrl.lastPathComponent
+
+                // Skip hidden files (versions are in .sordello/)
+                guard !fileName.hasPrefix(".") else { continue }
+
                 let filePath = fileUrl.path
                 currentFilePaths.insert(filePath)
 
@@ -153,32 +164,11 @@ struct FileScanner {
                         print("FileScanner: File changed: \(existing.name)")
                     }
                 } else {
-                    // New file
-                    let category: FileCategory
-                    if fileName.hasPrefix(".subproject-") {
-                        category = .liveSetTrackVersion
-                    } else if fileName.hasPrefix(".version-") {
-                        category = .version
-                    } else {
-                        category = .main
-                    }
-
-                    var liveSet = LiveSet(path: filePath, category: category)
+                    // New main LiveSet
+                    var liveSet = LiveSet(path: filePath, category: .main)
                     liveSet.projectPath = project.path
                     liveSet.comment = loadComment(for: fileUrl)
                     liveSet.fileModificationDate = currentModDate
-
-                    if category == .liveSetTrackVersion {
-                        loadSubprojectMetadata(for: &liveSet, folderUrl: folderUrl)
-                    } else if category == .version {
-                        // Link version to its parent LiveSet
-                        if let parentName = extractParentName(from: fileName) {
-                            let mainLiveSets = try db.fetchMainLiveSets()
-                            if let parent = mainLiveSets.first(where: { $0.name == parentName }) {
-                                liveSet.parentLiveSetPath = parent.path
-                            }
-                        }
-                    }
 
                     try db.insertLiveSet(liveSet)
                     newLiveSets.append(liveSet)
@@ -218,20 +208,70 @@ struct FileScanner {
             }
         }
 
-        // Remove deleted files (exclude version LiveSets - they're in .sordello/versions/)
+        // Scan .sordello/{fileName}/versions/ for version files
+        let sordelloUrl = folderUrl.appendingPathComponent(".sordello")
+        let mainLiveSets = try db.fetchMainLiveSets()
+        let mainLiveSetsByName = Dictionary(uniqueKeysWithValues: mainLiveSets.map { ($0.name, $0) })
+
+        if let sordelloContents = try? fileManager.contentsOfDirectory(at: sordelloUrl, includingPropertiesForKeys: nil) {
+            for itemUrl in sordelloContents {
+                // Skip non-directories and special folders like "db"
+                var isDir: ObjCBool = false
+                guard fileManager.fileExists(atPath: itemUrl.path, isDirectory: &isDir),
+                      isDir.boolValue,
+                      itemUrl.lastPathComponent != "db" else { continue }
+
+                // Check for versions subdirectory
+                let versionsUrl = itemUrl.appendingPathComponent("versions")
+                guard let versionFiles = try? fileManager.contentsOfDirectory(at: versionsUrl, includingPropertiesForKeys: [.contentModificationDateKey]) else { continue }
+
+                // Find the parent LiveSet by matching the folder name
+                let parentName = itemUrl.lastPathComponent
+                let parentLiveSet = mainLiveSetsByName[parentName]
+
+                for versionUrl in versionFiles where versionUrl.pathExtension.lowercased() == "als" {
+                    let filePath = versionUrl.path
+                    currentFilePaths.insert(filePath)
+
+                    let currentModDate = getFileModificationDate(for: versionUrl)
+
+                    if var existing = existingByPath[filePath] {
+                        // Check if file was modified
+                        if let storedDate = existing.fileModificationDate,
+                           let currentDate = currentModDate,
+                           currentDate.timeIntervalSince(storedDate) > 1.0 {
+                            existing.fileModificationDate = currentDate
+                            try db.updateLiveSet(existing)
+                            changedLiveSets.append(existing)
+                            print("FileScanner: Version file changed: \(existing.name)")
+                        }
+                    } else {
+                        // New version file
+                        var liveSet = LiveSet(path: filePath, category: .version)
+                        liveSet.projectPath = project.path
+                        liveSet.parentLiveSetPath = parentLiveSet?.path
+                        liveSet.fileModificationDate = currentModDate
+                        try db.insertLiveSet(liveSet)
+                        newLiveSets.append(liveSet)
+                        print("FileScanner: New version file: \(versionUrl.lastPathComponent)")
+                    }
+                }
+            }
+        }
+
+        // Remove deleted files
         for (path, liveSet) in existingByPath {
-            if !currentFilePaths.contains(path) && liveSet.category != .version {
+            if !currentFilePaths.contains(path) {
                 print("FileScanner: Deleted file: \(liveSet.name)")
                 try db.deleteLiveSet(path: path)
             }
         }
 
-        let toReparse = changedLiveSets + newLiveSets
-        if toReparse.isEmpty {
+        if changedLiveSets.isEmpty && newLiveSets.isEmpty {
             print("FileScanner: No files changed")
         }
 
-        return toReparse
+        return IncrementalUpdateResult(changed: changedLiveSets, new: newLiveSets)
     }
 
     // MARK: - Helper Methods
@@ -251,51 +291,4 @@ struct FileScanner {
         }
         return nil
     }
-
-    /// Extract parent LiveSet name from version filename
-    /// Format: .version-{parentName}-{timestamp}.als
-    static func extractParentName(from fileName: String) -> String? {
-        var name = fileName
-        if name.hasPrefix(".version-") {
-            name = String(name.dropFirst(".version-".count))
-        }
-        if name.hasSuffix(".als") {
-            name = String(name.dropLast(".als".count))
-        }
-
-        if let range = name.range(of: #"-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z?$"#, options: .regularExpression) {
-            return String(name[..<range.lowerBound])
-        }
-
-        return nil
-    }
-
-    /// Load subproject metadata from companion JSON file
-    static func loadSubprojectMetadata(for liveSet: inout LiveSet, folderUrl: URL) {
-        let baseName = URL(fileURLWithPath: liveSet.path).deletingPathExtension().lastPathComponent
-        let metadataFileName = "\(baseName)-meta.json"
-        let metadataUrl = folderUrl.appendingPathComponent(metadataFileName)
-
-        guard let metadataData = try? Data(contentsOf: metadataUrl) else { return }
-
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-
-        if let metadata = try? decoder.decode(SubprojectMetadataDTO.self, from: metadataData) {
-            liveSet.sourceLiveSetName = metadata.sourceLiveSetName
-            liveSet.sourceGroupId = metadata.sourceGroupId
-            liveSet.sourceGroupName = metadata.sourceGroupName
-            liveSet.extractedAt = metadata.extractedAt
-        }
-    }
-}
-
-// MARK: - DTOs
-
-/// DTO for reading subproject metadata JSON
-private struct SubprojectMetadataDTO: Codable {
-    let sourceLiveSetName: String
-    let sourceGroupId: Int
-    let sourceGroupName: String
-    let extractedAt: Date
 }

@@ -148,7 +148,7 @@ final class BookmarkManager {
 
     /// Resolve bookmark data to URL for background thread usage
     /// Returns the URL if successful, along with whether access was started
-    static func resolveBookmark(_ bookmarkData: Data) -> (url: URL, needsStopAccess: Bool)? {
+    nonisolated static func resolveBookmark(_ bookmarkData: Data) -> (url: URL, needsStopAccess: Bool)? {
         var isStale = false
         guard let url = try? URL(
             resolvingBookmarkData: bookmarkData,

@@ -132,6 +132,11 @@ When searching for documentation or APIs, ALWAYS search for iOS 26 / macOS 26, N
 - For GRDB: use `ValueObservation.values(in:)` which returns `AsyncValueObservation`
 - Avoid `AnyCancellable`, `sink()`, `.publisher()` patterns
 
+**Date formatting:**
+- ALWAYS use `K.dateFormat.timestamp` for filesystem-safe timestamps
+- Format: `yyyy-MM-dd'T'HH-mm-ss` (e.g., `2025-12-10T14-30-00`)
+- Used for version file names and any date that needs to be filesystem-safe
+
 ### Requirements
 - macOS 26.1+ (required)
 - Xcode 16+

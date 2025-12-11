@@ -30,19 +30,13 @@ struct ContentView: View {
                     .foregroundColor(.secondary)
             }
         } detail: {
-            if let selectedPath = UIState.shared.selectedLiveSetPath {
-                // Get the project path from the liveSet path (handle "original-" prefix)
-                let actualPath = selectedPath.hasPrefix("original-")
-                    ? String(selectedPath.dropFirst("original-".count))
-                    : selectedPath
-                let projectPath = URL(fileURLWithPath: actualPath).deletingLastPathComponent().path
-
-                if let db = ProjectManager.shared.database(forProjectPath: projectPath)?.dbQueue {
-                    LiveSetDetailWrapper(liveSetPath: selectedPath)
-                        .databaseContext(.readOnly { db })
-                } else {
-                    ProgressView("Loading...")
-                }
+            if let selectedPath = UIState.shared.selectedLiveSetPath,
+               let projectPath = UIState.shared.selectedProjectPath,
+               let db = ProjectManager.shared.database(forProjectPath: projectPath)?.dbQueue {
+                LiveSetDetailWrapper(liveSetPath: selectedPath)
+                    .databaseContext(.readOnly { db })
+            } else if UIState.shared.selectedLiveSetPath != nil {
+                ProgressView("Loading...")
             } else {
                 VStack(spacing: 16) {
                     Image(systemName: "music.note.list")

@@ -126,14 +126,8 @@ final class ProjectManager {
             } else {
                 // Existing data - do incremental update to preserve parsed data
                 print("Existing project database with \(existingLiveSets.count) LiveSets, doing incremental update...")
-                let toReparse = try FileScanner.incrementalUpdate(in: folderUrl, for: project, db: projectDb)
-                handleIncrementalUpdateResults(toReparse, project: project, db: projectDb)
-            }
-
-            // Sync any orphaned version files to the database
-            if let vc = versionControls[folderUrl.path] {
-                let mainLiveSets = try projectDb.fetchMainLiveSets()
-                try vc.syncVersionsToDatabase(db: projectDb, mainLiveSets: mainLiveSets)
+                let result = try FileScanner.incrementalUpdate(in: folderUrl, for: project, db: projectDb)
+                handleIncrementalUpdateResults(result, project: project, db: projectDb)
             }
 
             // Add to open projects list if not already there
@@ -155,10 +149,12 @@ final class ProjectManager {
         if accessing { folderUrl.stopAccessingSecurityScopedResource() }
 
         // Watch the folder for changes
-        FileWatcher.shared.watchFile(at: folderUrl.path) { [weak self] in
-            print("Folder changed: \(folderUrl.path)")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                self?.reloadProject(folderPath: folderUrl.path)
+        let projectPath = folderUrl.path
+        FileWatcher.shared.watchFile(at: projectPath) {
+            // Small delay to let file operations complete
+            Task {
+                try? await Task.sleep(for: .milliseconds(500))
+                ProjectManager.shared.reloadProject(folderPath: projectPath)
             }
         }
     }
@@ -235,8 +231,8 @@ final class ProjectManager {
             do {
                 guard let projectDb = self.projectDatabases[folderPath],
                       let project = try projectDb.fetchProject() else { return }
-                let toReparse = try FileScanner.incrementalUpdate(in: folderUrl, for: project, db: projectDb)
-                self.handleIncrementalUpdateResults(toReparse, project: project, db: projectDb)
+                let result = try FileScanner.incrementalUpdate(in: folderUrl, for: project, db: projectDb)
+                self.handleIncrementalUpdateResults(result, project: project, db: projectDb)
             } catch {
                 print("Failed to reload project: \(error)")
             }
@@ -244,7 +240,8 @@ final class ProjectManager {
     }
 
     /// Handle the results of an incremental update - parse changed files and manage versions
-    private func handleIncrementalUpdateResults(_ toReparse: [LiveSet], project: Project, db: ProjectDatabase) {
+    private func handleIncrementalUpdateResults(_ result: FileScanner.IncrementalUpdateResult, project: Project, db: ProjectDatabase) {
+        let toReparse = result.allToReparse
         guard !toReparse.isEmpty else {
             print("No files changed")
             return
@@ -262,11 +259,12 @@ final class ProjectManager {
             linkTracksToSubprojects(liveSet: liveSet, projectPath: project.path)
         }
 
-        // Auto-save versions of changed main LiveSets (if enabled)
+        // Auto-save versions of CHANGED main LiveSets only (not new files)
         if let vc = versionControls[project.path] {
-            for liveSet in toReparse where liveSet.category == .main && liveSet.autoVersionEnabled {
+            for liveSet in result.changed where liveSet.category == .main && liveSet.autoVersionEnabled {
                 do {
-                    try vc.commitLiveSet(at: liveSet.path, db: db)
+                    let versionPath = vc.versionPath(for: liveSet.path)
+                    try vc.createCopy(of: liveSet.path, to: versionPath)
                 } catch {
                     print("VersionControl: Failed to save version of \(liveSet.name): \(error)")
                 }
@@ -325,39 +323,28 @@ final class ProjectManager {
         }
     }
 
-    /// Create a version of a LiveSet by copying it with a timestamp
-    func createVersion(of liveSet: LiveSet, comment: String? = nil) {
-        guard let projectPath = liveSet.projectPath else { return }
+    /// Create a version of a LiveSet
+    func createVersion(of liveSet: LiveSet) {
+        guard let projectPath = liveSet.projectPath,
+              let vc = versionControls[projectPath],
+              let projectDb = projectDatabases[projectPath] else { return }
 
-        BookmarkManager.shared.accessFile(at: projectPath) { folderUrl in
-            let fileManager = FileManager.default
-            let sourceUrl = URL(fileURLWithPath: liveSet.path)
+        // Generate version path
+        let versionPath = vc.versionPath(for: liveSet.path)
 
-            // Generate timestamp: YYYY-MM-DDTHH-MM-SSZ
-            let formatter = ISO8601DateFormatter()
-            formatter.formatOptions = [.withInternetDateTime]
-            let timestamp = formatter.string(from: Date())
-                .replacingOccurrences(of: ":", with: "-")
+        // Insert a copy immediately so it appears in UI
+        var copy = liveSet
+        copy.path = versionPath
+        copy.category = .version
+        copy.parentLiveSetPath = liveSet.path
+        copy.isParsed = false
+        try? projectDb.insertLiveSet(copy)
 
-            // Create version filename: .version-{liveSetName}-{timestamp}.als
-            let versionBaseName = ".version-\(liveSet.name)-\(timestamp)"
-            let versionFileName = "\(versionBaseName).als"
-            let destinationUrl = folderUrl.appendingPathComponent(versionFileName)
-
+        // Create file on disk in background, then trigger reload
+        Task {
             do {
-                try fileManager.copyItem(at: sourceUrl, to: destinationUrl)
-                print("Created version: \(versionFileName)")
-
-                // Save comment file if provided
-                if let comment = comment, !comment.isEmpty {
-                    let commentFileName = "\(versionBaseName)-comment.txt"
-                    let commentUrl = folderUrl.appendingPathComponent(commentFileName)
-                    try comment.write(to: commentUrl, atomically: true, encoding: .utf8)
-                    print("Created comment file: \(commentFileName)")
-                }
-
-                // Rescan project to show new version
-                self.rescanProject(projectPath: projectPath)
+                try await vc.createCopyAsync(of: liveSet.path, to: versionPath)
+                self.reloadProject(folderPath: projectPath)
             } catch {
                 print("Failed to create version: \(error.localizedDescription)")
             }

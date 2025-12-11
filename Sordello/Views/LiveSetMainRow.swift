@@ -11,10 +11,8 @@ struct LiveSetMainRow: View {
     let versionCount: Int
     let isExpanded: Bool
     var onToggleExpand: (() -> Void)?
+    var onSelect: (() -> Void)?
     var latestVersionPath: String?
-
-    @State private var showVersionDialog = false
-    @State private var versionComment = ""
 
     private var isSelected: Bool {
         UIState.shared.selectedLiveSetPath == liveSet.path
@@ -62,7 +60,7 @@ struct LiveSetMainRow: View {
                 // Second click on selected liveset with versions toggles expand/collapse
                 onToggleExpand?()
             } else {
-                UIState.shared.selectedLiveSetPath = liveSet.path
+                onSelect?()
             }
         }
         .contextMenu {
@@ -87,19 +85,9 @@ struct LiveSetMainRow: View {
 
             Divider()
 
-            Button("Create Version...") {
-                versionComment = ""
-                showVersionDialog = true
+            Button("Create Version") {
+                ProjectManager.shared.createVersion(of: liveSet)
             }
-        }
-        .alert("Create Version", isPresented: $showVersionDialog) {
-            TextField("Comment (optional)", text: $versionComment)
-            Button("Create") {
-                ProjectManager.shared.createVersion(of: liveSet, comment: versionComment.isEmpty ? nil : versionComment)
-            }
-            Button("Cancel", role: .cancel) { }
-        } message: {
-            Text("Add an optional comment to describe this version.")
         }
     }
 }

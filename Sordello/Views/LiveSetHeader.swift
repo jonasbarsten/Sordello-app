@@ -249,13 +249,21 @@ struct LiveSetHeader: View {
             return
         }
 
-        // Generate output path as a version file
-        let timestamp = ISO8601DateFormatter().string(from: Date())
-            .replacingOccurrences(of: ":", with: "-")
-            .prefix(19)  // Remove timezone
-        let baseName = liveSet.name
-        let outputFileName = ".version-\(baseName)-\(timestamp).als"
-        let outputPath = (projectPath as NSString).appendingPathComponent(outputFileName)
+        // Generate output path using VersionControl
+        guard let vc = ProjectManager.shared.versionControl(forProjectPath: projectPath) else {
+            isSaving = false
+            saveError = "Version control not initialized"
+            showSaveError = true
+            return
+        }
+        let outputPath = vc.versionPath(for: liveSet.path)
+
+        // Create versions directory if needed
+        let versionsDir = URL(fileURLWithPath: outputPath).deletingLastPathComponent().path
+        let fileManager = FileManager.default
+        if !fileManager.fileExists(atPath: versionsDir) {
+            try? fileManager.createDirectory(atPath: versionsDir, withIntermediateDirectories: true)
+        }
 
         // Use AlsModifier to save changes
         let modifier = AlsModifier()

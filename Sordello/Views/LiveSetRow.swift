@@ -73,7 +73,7 @@ struct LiveSetRow: View {
 }
 
 #Preview("Subproject") {
-    var subproject = LiveSet(path: "/test/.subproject-My Song-Drums-2025-12-09T14-30-00.als", category: .liveSetTrackVersion)
+    var subproject = LiveSet(path: "/test/.sordello/My Song/subprojects/Drums-2025-12-09T14-30-00.als", category: .liveSetTrackVersion)
     subproject.sourceLiveSetName = "My Song"
     subproject.sourceGroupName = "Drums"
     subproject.sourceGroupId = 15

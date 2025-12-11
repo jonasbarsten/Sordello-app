@@ -63,7 +63,7 @@ struct VersionRow: View {
 }
 
 #Preview {
-    var version = LiveSet(path: "/test/.version-My Song-2025-12-09T14-30-00.als", category: .version)
+    var version = LiveSet(path: "/test/.sordello/My Song/versions/2025-12-09T14-30-00.als", category: .version)
     version.comment = "Added new drums"
     return VersionRow(version: version)
 }

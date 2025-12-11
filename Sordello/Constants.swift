@@ -17,4 +17,9 @@ nonisolated struct K {
         /// Maximum concurrent ALS parsing tasks to limit memory usage
         static let maxConcurrentAlsParsers = 4
     }
+
+    nonisolated struct dateFormat {
+        /// Filesystem-safe timestamp format for version files
+        static let timestamp = "yyyy-MM-dd'T'HH-mm-ss"
+    }
 }
