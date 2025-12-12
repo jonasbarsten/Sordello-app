@@ -42,12 +42,11 @@ nonisolated class ProjectDatabase {
         let projectUrl = URL(fileURLWithPath: projectPath)
 
         // Create .sordello/db/ directory
-        let sordelloDir = projectUrl.appendingPathComponent(".sordello")
-        let dbDir = sordelloDir.appendingPathComponent("db")
+        let dbDir = projectUrl.appendingPathComponent(K.sordello.dbPath)
 
         try fileManager.createDirectory(at: dbDir, withIntermediateDirectories: true)
 
-        let dbPath = dbDir.appendingPathComponent("sordello.db").path
+        let dbPath = dbDir.appendingPathComponent(K.sordello.dbFile).path
         self.databasePath = dbPath
 
         var config = Configuration()
@@ -75,37 +74,40 @@ nonisolated class ProjectDatabase {
 
         var migrator = DatabaseMigrator()
 
-        // v1: Initial schema
-        migrator.registerMigration("v1") { db in
+        // v1: Initial schema with ProjectItems (replaces LiveSets)
+        migrator.registerMigration("v1_project_items") { db in
             // Projects table (mainly for metadata, path is this project)
             try db.create(table: "projects") { t in
                 t.primaryKey("path", .text)
                 t.column("lastUpdated", .datetime).notNull()
             }
 
-            // LiveSets table
-            try db.create(table: "live_sets") { t in
+            // ProjectItems table (any file or directory in the project)
+            try db.create(table: "project_items") { t in
                 t.primaryKey("path", .text)
                 t.column("projectPath", .text)
                     .references("projects", column: "path", onDelete: .cascade)
+                t.column("itemType", .text).notNull()  // directory, als, wav, mid, etc.
                 t.column("category", .text).notNull()
-                t.column("liveVersion", .text).notNull().defaults(to: "Unknown")
                 t.column("comment", .text)
                 t.column("lastUpdated", .datetime).notNull()
                 t.column("fileModificationDate", .datetime)
                 t.column("isParsed", .boolean).notNull().defaults(to: false)
                 t.column("backupTimestamp", .datetime)
-                t.column("parentLiveSetPath", .text)
+                t.column("parentItemPath", .text)
+                t.column("autoVersionEnabled", .boolean).notNull().defaults(to: true)
+                // ALS-specific fields (nullable, only used for .als files)
+                t.column("liveVersion", .text)
                 t.column("sourceLiveSetName", .text)
-                t.column("sourceGroupId", .integer)
-                t.column("sourceGroupName", .text)
+                t.column("sourceTrackId", .integer)
+                t.column("sourceTrackName", .text)
                 t.column("extractedAt", .datetime)
             }
 
-            // Tracks table
+            // Tracks table (for .als files)
             try db.create(table: "tracks") { t in
-                t.column("liveSetPath", .text)
-                    .references("live_sets", column: "path", onDelete: .cascade)
+                t.column("projectItemPath", .text)
+                    .references("project_items", column: "path", onDelete: .cascade)
                 t.column("trackId", .integer).notNull()
                 t.column("name", .text).notNull()
                 t.column("originalName", .text).notNull()
@@ -125,7 +127,7 @@ nonisolated class ProjectDatabase {
                 t.column("midiOutputJSON", .text)
 
                 // Composite primary key
-                t.primaryKey(["liveSetPath", "trackId"])
+                t.primaryKey(["projectItemPath", "trackId"])
             }
 
             // ConnectedDevices table (for OSC connections)
@@ -138,25 +140,11 @@ nonisolated class ProjectDatabase {
             }
 
             // Indexes for common queries
-            try db.create(index: "live_sets_projectPath", on: "live_sets", columns: ["projectPath"])
-            try db.create(index: "live_sets_category", on: "live_sets", columns: ["category"])
-            try db.create(index: "tracks_liveSetPath", on: "tracks", columns: ["liveSetPath"])
+            try db.create(index: "project_items_projectPath", on: "project_items", columns: ["projectPath"])
+            try db.create(index: "project_items_category", on: "project_items", columns: ["category"])
+            try db.create(index: "project_items_itemType", on: "project_items", columns: ["itemType"])
+            try db.create(index: "tracks_projectItemPath", on: "tracks", columns: ["projectItemPath"])
             try db.create(index: "tracks_parentGroupId", on: "tracks", columns: ["parentGroupId"])
-        }
-
-        // v2: Add autoVersionEnabled to live_sets
-        migrator.registerMigration("v2") { db in
-            try db.alter(table: "live_sets") { t in
-                t.add(column: "autoVersionEnabled", .boolean).notNull().defaults(to: true)
-            }
-        }
-
-        // v3: Rename sourceGroupId/Name to sourceTrackId/Name
-        migrator.registerMigration("v3") { db in
-            try db.alter(table: "live_sets") { t in
-                t.rename(column: "sourceGroupId", to: "sourceTrackId")
-                t.rename(column: "sourceGroupName", to: "sourceTrackName")
-            }
         }
 
         try migrator.migrate(db)
@@ -193,57 +181,68 @@ nonisolated class ProjectDatabase {
         }
     }
 
-    // MARK: - LiveSet Operations
+    // MARK: - ProjectItem Operations
 
-    func insertLiveSet(_ liveSet: LiveSet) throws {
+    func insertProjectItem(_ item: ProjectItem) throws {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
         try db.write { db in
-            let ls = liveSet
-            try ls.insert(db)
+            try item.insert(db)
         }
     }
 
-    func updateLiveSet(_ liveSet: LiveSet) throws {
+    func updateProjectItem(_ item: ProjectItem) throws {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
         try db.write { db in
-            try liveSet.update(db)
+            try item.update(db)
         }
     }
 
-    func deleteLiveSet(path: String) throws {
+    func deleteProjectItem(path: String) throws {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
         _ = try db.write { db in
-            try LiveSet.deleteOne(db, key: path)
+            try ProjectItem.deleteOne(db, key: path)
         }
     }
 
-    func fetchLiveSet(path: String) throws -> LiveSet? {
+    func fetchProjectItem(path: String) throws -> ProjectItem? {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
         return try db.read { db in
-            try LiveSet.fetchOne(db, key: path)
+            try ProjectItem.fetchOne(db, key: path)
         }
     }
 
-    func fetchAllLiveSets() throws -> [LiveSet] {
+    func fetchAllProjectItems() throws -> [ProjectItem] {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
         return try db.read { db in
-            try LiveSet
+            try ProjectItem
                 .filter(Column("projectPath") == projectPath)
                 .order(Column("category"), Column("path"))
                 .fetchAll(db)
         }
     }
 
-    func fetchMainLiveSets() throws -> [LiveSet] {
+    func fetchProjectItems(ofType itemType: ItemType) throws -> [ProjectItem] {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
         return try db.read { db in
-            try LiveSet
+            try ProjectItem
+                .filter(Column("projectPath") == projectPath)
+                .filter(Column("itemType") == itemType.rawValue)
+                .order(Column("path"))
+                .fetchAll(db)
+        }
+    }
+
+    func fetchMainProjectItems() throws -> [ProjectItem] {
+        guard let db = dbQueue else { throw DatabaseError.notConnected }
+
+        return try db.read { db in
+            try ProjectItem
                 .filter(Column("projectPath") == projectPath)
                 .filter(Column("category") == FileCategory.main.rawValue)
                 .order(Column("path"))
@@ -251,22 +250,22 @@ nonisolated class ProjectDatabase {
         }
     }
 
-    func fetchSubprojectLiveSets() throws -> [LiveSet] {
+    func fetchSubprojectItems() throws -> [ProjectItem] {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
         return try db.read { db in
-            try LiveSet
+            try ProjectItem
                 .filter(Column("projectPath") == projectPath)
                 .filter(Column("category") == FileCategory.liveSetTrackVersion.rawValue)
                 .fetchAll(db)
         }
     }
 
-    func fetchBackupLiveSets() throws -> [LiveSet] {
+    func fetchBackupProjectItems() throws -> [ProjectItem] {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
         return try db.read { db in
-            try LiveSet
+            try ProjectItem
                 .filter(Column("projectPath") == projectPath)
                 .filter(Column("category") == FileCategory.backup.rawValue)
                 .order(Column("backupTimestamp").desc)
@@ -274,27 +273,40 @@ nonisolated class ProjectDatabase {
         }
     }
 
-    func fetchVersionLiveSets(forParentPath parentPath: String) throws -> [LiveSet] {
+    func fetchVersionProjectItems(forParentPath parentPath: String) throws -> [ProjectItem] {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
         return try db.read { db in
-            try LiveSet
+            try ProjectItem
                 .filter(Column("category") == FileCategory.version.rawValue)
-                .filter(Column("parentLiveSetPath") == parentPath)
+                .filter(Column("parentItemPath") == parentPath)
                 .order(Column("path").desc)
                 .fetchAll(db)
         }
     }
 
-    func deleteAllLiveSets() throws {
+    func deleteAllProjectItems() throws {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
         _ = try db.write { db in
-            try LiveSet
+            try ProjectItem
                 .filter(Column("projectPath") == projectPath)
                 .deleteAll(db)
         }
     }
+
+    // MARK: - Backwards Compatibility Aliases
+
+    func insertLiveSet(_ liveSet: LiveSet) throws { try insertProjectItem(liveSet) }
+    func updateLiveSet(_ liveSet: LiveSet) throws { try updateProjectItem(liveSet) }
+    func deleteLiveSet(path: String) throws { try deleteProjectItem(path: path) }
+    func fetchLiveSet(path: String) throws -> LiveSet? { try fetchProjectItem(path: path) }
+    func fetchAllLiveSets() throws -> [LiveSet] { try fetchAllProjectItems() }
+    func fetchMainLiveSets() throws -> [LiveSet] { try fetchMainProjectItems() }
+    func fetchSubprojectLiveSets() throws -> [LiveSet] { try fetchSubprojectItems() }
+    func fetchBackupLiveSets() throws -> [LiveSet] { try fetchBackupProjectItems() }
+    func fetchVersionLiveSets(forParentPath parentPath: String) throws -> [LiveSet] { try fetchVersionProjectItems(forParentPath: parentPath) }
+    func deleteAllLiveSets() throws { try deleteAllProjectItems() }
 
     // MARK: - Track Operations
 
@@ -302,8 +314,7 @@ nonisolated class ProjectDatabase {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
         try db.write { db in
-            let t = track
-            try t.insert(db)
+            try track.insert(db)
         }
     }
 
@@ -315,73 +326,82 @@ nonisolated class ProjectDatabase {
         }
     }
 
-    func deleteTracksForLiveSet(liveSetPath: String) throws {
+    func deleteTracksForProjectItem(projectItemPath: String) throws {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
         _ = try db.write { db in
             try LiveSetTrack
-                .filter(Column("liveSetPath") == liveSetPath)
+                .filter(Column("projectItemPath") == projectItemPath)
                 .deleteAll(db)
         }
     }
 
-    func fetchTracks(forLiveSetPath liveSetPath: String) throws -> [LiveSetTrack] {
+    func fetchTracks(forProjectItemPath projectItemPath: String) throws -> [LiveSetTrack] {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
         return try db.read { db in
             try LiveSetTrack
-                .filter(Column("liveSetPath") == liveSetPath)
+                .filter(Column("projectItemPath") == projectItemPath)
                 .order(Column("sortIndex"))
                 .fetchAll(db)
         }
     }
 
-    func fetchRootTracks(forLiveSetPath liveSetPath: String) throws -> [LiveSetTrack] {
+    func fetchRootTracks(forProjectItemPath projectItemPath: String) throws -> [LiveSetTrack] {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
         return try db.read { db in
             try LiveSetTrack
-                .filter(Column("liveSetPath") == liveSetPath)
+                .filter(Column("projectItemPath") == projectItemPath)
                 .filter(Column("parentGroupId") == nil)
                 .order(Column("sortIndex"))
                 .fetchAll(db)
         }
     }
 
-    func fetchChildTracks(forLiveSetPath liveSetPath: String, parentGroupId: Int) throws -> [LiveSetTrack] {
+    func fetchChildTracks(forProjectItemPath projectItemPath: String, parentGroupId: Int) throws -> [LiveSetTrack] {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
         return try db.read { db in
             try LiveSetTrack
-                .filter(Column("liveSetPath") == liveSetPath)
+                .filter(Column("projectItemPath") == projectItemPath)
                 .filter(Column("parentGroupId") == parentGroupId)
                 .order(Column("sortIndex"))
                 .fetchAll(db)
         }
     }
 
-    func fetchTrack(liveSetPath: String, trackId: Int) throws -> LiveSetTrack? {
+    func fetchTrack(projectItemPath: String, trackId: Int) throws -> LiveSetTrack? {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
         return try db.read { db in
             try LiveSetTrack
-                .filter(Column("liveSetPath") == liveSetPath)
+                .filter(Column("projectItemPath") == projectItemPath)
                 .filter(Column("trackId") == trackId)
                 .fetchOne(db)
         }
     }
 
-    func fetchGroupTracks(forLiveSetPath liveSetPath: String) throws -> [LiveSetTrack] {
+    func fetchGroupTracks(forProjectItemPath projectItemPath: String) throws -> [LiveSetTrack] {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
         return try db.read { db in
             try LiveSetTrack
-                .filter(Column("liveSetPath") == liveSetPath)
+                .filter(Column("projectItemPath") == projectItemPath)
                 .filter(Column("type") == TrackType.group.rawValue)
                 .order(Column("sortIndex"))
                 .fetchAll(db)
         }
     }
+
+    // MARK: - Track Backwards Compatibility Aliases
+
+    func deleteTracksForLiveSet(liveSetPath: String) throws { try deleteTracksForProjectItem(projectItemPath: liveSetPath) }
+    func fetchTracks(forLiveSetPath liveSetPath: String) throws -> [LiveSetTrack] { try fetchTracks(forProjectItemPath: liveSetPath) }
+    func fetchRootTracks(forLiveSetPath liveSetPath: String) throws -> [LiveSetTrack] { try fetchRootTracks(forProjectItemPath: liveSetPath) }
+    func fetchChildTracks(forLiveSetPath liveSetPath: String, parentGroupId: Int) throws -> [LiveSetTrack] { try fetchChildTracks(forProjectItemPath: liveSetPath, parentGroupId: parentGroupId) }
+    func fetchTrack(liveSetPath: String, trackId: Int) throws -> LiveSetTrack? { try fetchTrack(projectItemPath: liveSetPath, trackId: trackId) }
+    func fetchGroupTracks(forLiveSetPath liveSetPath: String) throws -> [LiveSetTrack] { try fetchGroupTracks(forProjectItemPath: liveSetPath) }
 
     // MARK: - Batch Operations
 
@@ -395,90 +415,28 @@ nonisolated class ProjectDatabase {
         }
     }
 
-    func saveLiveSetWithTracks(_ liveSet: LiveSet, tracks: [LiveSetTrack]) throws {
+    func saveProjectItemWithTracks(_ item: ProjectItem, tracks: [LiveSetTrack]) throws {
         guard let db = dbQueue else { throw DatabaseError.notConnected }
 
         try db.write { db in
-            // Update or insert LiveSet
-            try liveSet.save(db)
+            // Update or insert ProjectItem
+            try item.save(db)
 
             // Delete existing tracks
             try LiveSetTrack
-                .filter(Column("liveSetPath") == liveSet.path)
+                .filter(Column("projectItemPath") == item.path)
                 .deleteAll(db)
 
             // Insert new tracks
             for var track in tracks {
-                track.liveSetPath = liveSet.path
+                track.projectItemPath = item.path
                 try track.insert(db)
             }
         }
     }
 
-    // MARK: - Async Observation (use with for-await loops)
-
-    /// Observe all LiveSets in this project
-    func observeLiveSets() -> ValueObservation<ValueReducers.Fetch<[LiveSet]>> {
-        ValueObservation.tracking { [projectPath] db in
-            try LiveSet
-                .filter(Column("projectPath") == projectPath)
-                .order(Column("category"), Column("path"))
-                .fetchAll(db)
-        }
-    }
-
-    /// Observe main LiveSets
-    func observeMainLiveSets() -> ValueObservation<ValueReducers.Fetch<[LiveSet]>> {
-        ValueObservation.tracking { [projectPath] db in
-            try LiveSet
-                .filter(Column("projectPath") == projectPath)
-                .filter(Column("category") == FileCategory.main.rawValue)
-                .order(Column("path"))
-                .fetchAll(db)
-        }
-    }
-
-    /// Observe tracks for a LiveSet
-    func observeTracks(forLiveSetPath liveSetPath: String) -> ValueObservation<ValueReducers.Fetch<[LiveSetTrack]>> {
-        ValueObservation.tracking { db in
-            try LiveSetTrack
-                .filter(Column("liveSetPath") == liveSetPath)
-                .order(Column("sortIndex"))
-                .fetchAll(db)
-        }
-    }
-
-    /// Observe root tracks for a LiveSet
-    func observeRootTracks(forLiveSetPath liveSetPath: String) -> ValueObservation<ValueReducers.Fetch<[LiveSetTrack]>> {
-        ValueObservation.tracking { db in
-            try LiveSetTrack
-                .filter(Column("liveSetPath") == liveSetPath)
-                .filter(Column("parentGroupId") == nil)
-                .order(Column("sortIndex"))
-                .fetchAll(db)
-        }
-    }
-
-    /// Observe child tracks of a group
-    func observeChildTracks(forLiveSetPath liveSetPath: String, parentGroupId: Int) -> ValueObservation<ValueReducers.Fetch<[LiveSetTrack]>> {
-        ValueObservation.tracking { db in
-            try LiveSetTrack
-                .filter(Column("liveSetPath") == liveSetPath)
-                .filter(Column("parentGroupId") == parentGroupId)
-                .order(Column("sortIndex"))
-                .fetchAll(db)
-        }
-    }
-
-    /// Observe version LiveSets for a parent
-    func observeVersionLiveSets(forParentPath parentPath: String) -> ValueObservation<ValueReducers.Fetch<[LiveSet]>> {
-        ValueObservation.tracking { db in
-            try LiveSet
-                .filter(Column("category") == FileCategory.version.rawValue)
-                .filter(Column("parentLiveSetPath") == parentPath)
-                .order(Column("path").desc)
-                .fetchAll(db)
-        }
+    func saveLiveSetWithTracks(_ liveSet: LiveSet, tracks: [LiveSetTrack]) throws {
+        try saveProjectItemWithTracks(liveSet, tracks: tracks)
     }
 
     // MARK: - Error Types

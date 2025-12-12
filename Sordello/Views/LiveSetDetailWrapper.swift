@@ -24,7 +24,7 @@ struct LiveSetDetailWrapper: View {
     var body: some View {
         Group {
             if let liveSet = liveSet {
-                ProjectFileDetailView(liveSet: liveSet)
+                LiveSetDetailView(liveSet: liveSet)
             } else {
                 ProgressView("Loading...")
             }

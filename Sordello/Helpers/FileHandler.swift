@@ -13,18 +13,16 @@ import Foundation
 /// Protocol for file type handlers
 /// Each supported file type has a handler that conforms to this protocol
 protocol FileHandler {
-    associatedtype FileType: ProjectFile
-
     /// Supported file extensions for this handler
     static var supportedExtensions: [String] { get }
 
-    /// Parse a file and return updated model + any child objects
+    /// Parse a ProjectItem and return updated model + any child objects
     /// Returns nil if parsing fails
-    static func parse(_ file: FileType) -> (file: FileType, children: [any Sendable])?
+    static func parse(_ item: ProjectItem) -> (item: ProjectItem, children: [any Sendable])?
 
     /// Parse and save to database
     /// Returns true if successful
-    static func parseAndSave(_ file: FileType, to db: ProjectDatabase) -> Bool
+    static func parseAndSave(_ item: ProjectItem, to db: ProjectDatabase) -> Bool
 
     /// Parse all files in background using security-scoped bookmark
     static func parseAllInBackground(paths: [String], bookmarkData: Data, db: ProjectDatabase, projectPath: String)
@@ -47,18 +45,18 @@ enum FileHandlers {
         // Future: || ImageHandler.supportedExtensions.contains(ext)
     }
 
-    /// Parse a ProjectFile and save to database
-    /// Dispatches to the appropriate handler based on file type
-    static func parseAndSave(_ file: any ProjectFile, to db: ProjectDatabase) -> Bool {
-        switch file {
-        case let liveSet as LiveSet:
-            return AlsHandler.parseAndSave(liveSet, to: db)
-        // Future:
-        // case let image as Image:
-        //     return ImageHandler.parseAndSave(image, to: db)
+    /// Parse a ProjectItem and save to database
+    /// Dispatches to the appropriate handler based on item type
+    static func parseAndSave(_ item: ProjectItem, to db: ProjectDatabase) -> Bool {
+        switch item.itemType {
+        case .als:
+            return AlsHandler.parseAndSave(item, to: db)
+        // Future handlers for other file types:
+        // case .wav, .aif, .mp3, .flac, .ogg:
+        //     return AudioHandler.parseAndSave(item, to: db)
         default:
-            print("FileHandlers: No handler for file type: \(type(of: file))")
-            return false
+            // No parsing needed for this file type
+            return true
         }
     }
 

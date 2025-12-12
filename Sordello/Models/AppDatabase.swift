@@ -32,10 +32,10 @@ final class AppDatabase {
         }
 
         // Create app directory if needed
-        let appDir = appSupport.appendingPathComponent("Sordello")
+        let appDir = appSupport.appendingPathComponent(K.app.supportDir)
         try fileManager.createDirectory(at: appDir, withIntermediateDirectories: true)
 
-        let dbPath = appDir.appendingPathComponent("sordello.db").path
+        let dbPath = appDir.appendingPathComponent(K.app.dbFile).path
 
         var config = Configuration()
         config.foreignKeysEnabled = true

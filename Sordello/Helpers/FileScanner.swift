@@ -5,6 +5,22 @@
 //  Scans project folders for files and updates the database.
 //  Generic file scanning extracted from ProjectManager.
 //
+//  ## Scanning Modes
+//
+//  1. **Full Scan** (`scanAndSaveLiveSets`):
+//     - Clears database and rescans everything
+//     - Used on first project load or when database is empty
+//
+//  2. **Incremental Update** (`incrementalUpdate`):
+//     - Compares disk state with database
+//     - Detects added, modified, and deleted files
+//     - Used when no specific change info is available
+//
+//  3. **Targeted Update** (`handleFileChanges`):
+//     - Processes specific file changes from FileWatcher
+//     - Most efficient: only checks the files that actually changed
+//     - Preferred method when FileWatcher provides change details
+//
 //  Created by Jonas Barsten on 10/12/2025.
 //
 
@@ -51,7 +67,7 @@ struct FileScanner {
             for fileUrl in rootContents where fileUrl.pathExtension.lowercased() == "als" {
                 let fileName = fileUrl.lastPathComponent
 
-                // Skip hidden files (versions are in .sordello/)
+                // Skip hidden files (versions are in .sordello/files/)
                 guard !fileName.hasPrefix(".") else { continue }
 
                 var liveSet = LiveSet(path: fileUrl.path, category: .main)
@@ -63,34 +79,33 @@ struct FileScanner {
             }
         }
 
-        // Scan .sordello/{fileName}/versions/ for version files
-        let sordelloUrl = folderUrl.appendingPathComponent(".sordello")
-        if let sordelloContents = try? fileManager.contentsOfDirectory(at: sordelloUrl, includingPropertiesForKeys: nil) {
-            for itemUrl in sordelloContents {
-                // Skip non-directories and special folders like "db"
+        // Scan .sordello/files/{fileName}/versions/ for version files
+        let sordelloFilesUrl = folderUrl.appendingPathComponent(K.sordello.filesPath)
+        if let filesContents = try? fileManager.contentsOfDirectory(at: sordelloFilesUrl, includingPropertiesForKeys: nil) {
+            for itemUrl in filesContents {
+                // Skip non-directories
                 var isDir: ObjCBool = false
                 guard fileManager.fileExists(atPath: itemUrl.path, isDirectory: &isDir),
-                      isDir.boolValue,
-                      itemUrl.lastPathComponent != "db" else { continue }
+                      isDir.boolValue else { continue }
 
                 // Find the parent LiveSet by matching the folder name
                 let parentName = itemUrl.lastPathComponent
                 guard let parentLiveSet = mainLiveSetPaths[parentName] else { continue }
 
                 // Check for versions subdirectory (optional - may not exist yet)
-                let versionsUrl = itemUrl.appendingPathComponent("versions")
+                let versionsUrl = itemUrl.appendingPathComponent(K.sordello.versionsDir)
                 let versionFiles = (try? fileManager.contentsOfDirectory(at: versionsUrl, includingPropertiesForKeys: nil)) ?? []
 
                 for versionUrl in versionFiles where versionUrl.pathExtension.lowercased() == "als" {
                     var liveSet = LiveSet(path: versionUrl.path, category: .version)
                     liveSet.projectPath = project.path
-                    liveSet.parentLiveSetPath = parentLiveSet.path
+                    liveSet.parentItemPath = parentLiveSet.path
                     liveSet.fileModificationDate = getFileModificationDate(for: versionUrl)
                     try db.insertLiveSet(liveSet)
                 }
 
                 // Check for liveSetTracks subdirectory
-                let liveSetTracksUrl = itemUrl.appendingPathComponent("liveSetTracks")
+                let liveSetTracksUrl = itemUrl.appendingPathComponent(K.sordello.liveSetTracksDir)
                 if let trackIdDirs = try? fileManager.contentsOfDirectory(at: liveSetTracksUrl, includingPropertiesForKeys: nil) {
                     for trackIdDir in trackIdDirs {
                         // Each subdirectory is named with the trackId
@@ -104,7 +119,7 @@ struct FileScanner {
                             for trackVersionUrl in trackVersionFiles where trackVersionUrl.pathExtension.lowercased() == "als" {
                                 var liveSet = LiveSet(path: trackVersionUrl.path, category: .liveSetTrackVersion)
                                 liveSet.projectPath = project.path
-                                liveSet.parentLiveSetPath = parentLiveSet.path
+                                liveSet.parentItemPath = parentLiveSet.path
                                 liveSet.sourceLiveSetName = parentName
                                 liveSet.sourceTrackId = trackId
                                 liveSet.fileModificationDate = getFileModificationDate(for: trackVersionUrl)
@@ -170,7 +185,7 @@ struct FileScanner {
             for fileUrl in rootContents where fileUrl.pathExtension.lowercased() == "als" {
                 let fileName = fileUrl.lastPathComponent
 
-                // Skip hidden files (versions are in .sordello/)
+                // Skip hidden files (versions are in .sordello/files/)
                 guard !fileName.hasPrefix(".") else { continue }
 
                 let filePath = fileUrl.path
@@ -233,25 +248,24 @@ struct FileScanner {
             }
         }
 
-        // Scan .sordello/{fileName}/versions/ for version files
-        let sordelloUrl = folderUrl.appendingPathComponent(".sordello")
+        // Scan .sordello/files/{fileName}/versions/ for version files
+        let sordelloFilesUrl = folderUrl.appendingPathComponent(K.sordello.filesPath)
         let mainLiveSets = try db.fetchMainLiveSets()
         let mainLiveSetsByName = Dictionary(uniqueKeysWithValues: mainLiveSets.map { ($0.name, $0) })
 
-        if let sordelloContents = try? fileManager.contentsOfDirectory(at: sordelloUrl, includingPropertiesForKeys: nil) {
-            for itemUrl in sordelloContents {
-                // Skip non-directories and special folders like "db"
+        if let filesContents = try? fileManager.contentsOfDirectory(at: sordelloFilesUrl, includingPropertiesForKeys: nil) {
+            for itemUrl in filesContents {
+                // Skip non-directories
                 var isDir: ObjCBool = false
                 guard fileManager.fileExists(atPath: itemUrl.path, isDirectory: &isDir),
-                      isDir.boolValue,
-                      itemUrl.lastPathComponent != "db" else { continue }
+                      isDir.boolValue else { continue }
 
                 // Find the parent LiveSet by matching the folder name
                 let parentName = itemUrl.lastPathComponent
                 let parentLiveSet = mainLiveSetsByName[parentName]
 
                 // Check for versions subdirectory (optional - may not exist yet)
-                let versionsUrl = itemUrl.appendingPathComponent("versions")
+                let versionsUrl = itemUrl.appendingPathComponent(K.sordello.versionsDir)
                 let versionFiles = (try? fileManager.contentsOfDirectory(at: versionsUrl, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
 
                 for versionUrl in versionFiles where versionUrl.pathExtension.lowercased() == "als" {
@@ -274,7 +288,7 @@ struct FileScanner {
                         // New version file
                         var liveSet = LiveSet(path: filePath, category: .version)
                         liveSet.projectPath = project.path
-                        liveSet.parentLiveSetPath = parentLiveSet?.path
+                        liveSet.parentItemPath = parentLiveSet?.path
                         liveSet.fileModificationDate = currentModDate
                         try db.insertLiveSet(liveSet)
                         newLiveSets.append(liveSet)
@@ -283,7 +297,7 @@ struct FileScanner {
                 }
 
                 // Check for liveSetTracks subdirectory
-                let liveSetTracksUrl = itemUrl.appendingPathComponent("liveSetTracks")
+                let liveSetTracksUrl = itemUrl.appendingPathComponent(K.sordello.liveSetTracksDir)
                 if let trackIdDirs = try? fileManager.contentsOfDirectory(at: liveSetTracksUrl, includingPropertiesForKeys: nil) {
                     for trackIdDir in trackIdDirs {
                         // Each subdirectory is named with the trackId
@@ -314,7 +328,7 @@ struct FileScanner {
                                     // New track version file
                                     var liveSet = LiveSet(path: filePath, category: .liveSetTrackVersion)
                                     liveSet.projectPath = project.path
-                                    liveSet.parentLiveSetPath = parentLiveSet?.path
+                                    liveSet.parentItemPath = parentLiveSet?.path
                                     liveSet.sourceLiveSetName = parentName
                                     liveSet.sourceTrackId = trackId
                                     liveSet.fileModificationDate = currentModDate

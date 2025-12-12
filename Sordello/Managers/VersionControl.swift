@@ -3,7 +3,7 @@
 //  Sordello
 //
 //  File-based version control for any file type
-//  Creates timestamped copies in .sordello/{fileName}/versions/
+//  Creates timestamped copies in .sordello/files/{fileName}/versions/
 //
 
 import Foundation
@@ -12,23 +12,24 @@ import Foundation
 final class VersionControl {
 
     private let projectPath: String
-    private let sordelloPath: String
+    private let filesPath: String
     private let bookmarkData: Data?
 
     /// Initialize version control for a project
     init(projectPath: String) {
         self.projectPath = projectPath
-        self.sordelloPath = (projectPath as NSString).appendingPathComponent(".sordello")
+        self.filesPath = (projectPath as NSString)
+            .appendingPathComponent(K.sordello.filesPath)
         self.bookmarkData = BookmarkManager.shared.getBookmarkData(for: projectPath)
     }
 
-    /// Initialize the .sordello directory if it doesn't exist
+    /// Initialize the .sordello/files directory if it doesn't exist
     func initializeIfNeeded() throws {
         let fileManager = FileManager.default
-        let sordelloUrl = URL(fileURLWithPath: sordelloPath)
+        let filesUrl = URL(fileURLWithPath: filesPath)
 
-        if !fileManager.fileExists(atPath: sordelloPath) {
-            try fileManager.createDirectory(at: sordelloUrl, withIntermediateDirectories: true)
+        if !fileManager.fileExists(atPath: filesPath) {
+            try fileManager.createDirectory(at: filesUrl, withIntermediateDirectories: true)
         }
     }
 
@@ -44,9 +45,9 @@ final class VersionControl {
         formatter.dateFormat = K.dateFormat.timestamp
         let versionName = formatter.string(from: Date())
 
-        return (sordelloPath as NSString)
+        return (filesPath as NSString)
             .appendingPathComponent(fileNameWithoutExtension)
-            .appending("/versions/\(versionName).\(fileExtension)")
+            .appending("/\(K.sordello.versionsDir)/\(versionName).\(fileExtension)")
     }
 
     /// Generate the path for a new track version (extracted track as standalone .als)
@@ -63,9 +64,9 @@ final class VersionControl {
         formatter.dateFormat = K.dateFormat.timestamp
         let versionName = formatter.string(from: Date())
 
-        return (sordelloPath as NSString)
+        return (filesPath as NSString)
             .appendingPathComponent(liveSetName)
-            .appending("/liveSetTracks/\(trackId)/\(versionName).\(fileExtension)")
+            .appending("/\(K.sordello.liveSetTracksDir)/\(trackId)/\(versionName).\(fileExtension)")
     }
 
     /// Copy a file synchronously (assumes caller has bookmark access)

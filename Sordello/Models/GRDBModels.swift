@@ -11,6 +11,40 @@ import GRDB
 
 // MARK: - Enums
 
+/// Type of item in the project (file or directory)
+enum ItemType: String, Codable, DatabaseValueConvertible, Sendable {
+    case directory
+    case als          // Ableton Live Set
+    case wav          // WAV audio
+    case aif          // AIFF audio
+    case mp3          // MP3 audio
+    case flac         // FLAC audio
+    case ogg          // OGG audio
+    case mid          // MIDI file
+    case other        // Any other file type
+
+    /// Create from file extension
+    nonisolated static func from(extension ext: String) -> ItemType {
+        switch ext.lowercased() {
+        case "als": return .als
+        case "wav": return .wav
+        case "aif", "aiff": return .aif
+        case "mp3": return .mp3
+        case "flac": return .flac
+        case "ogg": return .ogg
+        case "mid", "midi": return .mid
+        default: return .other
+        }
+    }
+
+    /// Create from path
+    nonisolated static func from(path: String, isDirectory: Bool) -> ItemType {
+        if isDirectory { return .directory }
+        let ext = URL(fileURLWithPath: path).pathExtension
+        return from(extension: ext)
+    }
+}
+
 /// Track type in Ableton
 enum TrackType: String, Codable, DatabaseValueConvertible {
     case audio = "AudioTrack"
@@ -48,22 +82,26 @@ struct Project: Codable, Identifiable, FetchableRecord, PersistableRecord, Senda
     }
 
     // MARK: - Associations
-    static let liveSets = hasMany(LiveSet.self)
+    static let projectItems = hasMany(ProjectItem.self)
     static let devices = hasMany(ConnectedDevice.self)
 
-    var liveSets: QueryInterfaceRequest<LiveSet> {
-        request(for: Project.liveSets)
+    var projectItems: QueryInterfaceRequest<ProjectItem> {
+        request(for: Project.projectItems)
     }
 
     var devices: QueryInterfaceRequest<ConnectedDevice> {
         request(for: Project.devices)
     }
+
+    // Alias for backwards compatibility
+    var liveSets: QueryInterfaceRequest<ProjectItem> {
+        projectItems
+    }
 }
 
-/// Represents an individual .als file (Live Set)
-nonisolated struct LiveSet: Codable, Identifiable, FetchableRecord, PersistableRecord, Sendable, ProjectFile, Hashable {
-    static let databaseTableName = "live_sets"
-    static let fileExtension = "als"
+/// Represents any file or directory tracked in a project
+struct ProjectItem: Codable, Identifiable, FetchableRecord, PersistableRecord, Sendable, Hashable {
+    static let databaseTableName = "project_items"
 
     /// Primary key - file path
     var id: String { path }
@@ -72,30 +110,37 @@ nonisolated struct LiveSet: Codable, Identifiable, FetchableRecord, PersistableR
     /// Foreign key to project
     var projectPath: String?
 
+    /// Type of item (directory, als, wav, mid, etc.)
+    var itemType: ItemType
+
     var category: FileCategory
-    var liveVersion: String
     var comment: String?
     var lastUpdated: Date
 
     /// File modification date on disk (for detecting changes)
     var fileModificationDate: Date?
 
-    /// Whether the .als file has been parsed (tracks extracted)
+    /// Whether the file has been parsed (e.g., tracks extracted from .als)
     var isParsed: Bool
 
     /// For backup files: extracted timestamp from filename for sorting
     var backupTimestamp: Date?
 
-    /// For version files: the parent LiveSet's path
-    var parentLiveSetPath: String?
+    /// For version files: the parent item's path
+    var parentItemPath: String?
 
-    /// Subproject metadata
+    // MARK: - ALS-specific fields (only used when itemType == .als)
+
+    /// Ableton Live version (only for .als files)
+    var liveVersion: String?
+
+    /// Subproject metadata (only for .als files)
     var sourceLiveSetName: String?
     var sourceTrackId: Int?
     var sourceTrackName: String?
     var extractedAt: Date?
 
-    /// Whether to auto-create versions when this LiveSet is saved (main LiveSets only)
+    /// Whether to auto-create versions when this item is saved
     var autoVersionEnabled: Bool
 
     /// Computed: Name from path
@@ -103,17 +148,33 @@ nonisolated struct LiveSet: Codable, Identifiable, FetchableRecord, PersistableR
         URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
     }
 
+    /// Computed: File extension
+    var fileExtension: String {
+        URL(fileURLWithPath: path).pathExtension.lowercased()
+    }
+
+    /// Computed: Is this an Ableton Live Set
+    var isLiveSet: Bool {
+        itemType == .als
+    }
+
+    /// Computed: Is this a directory
+    var isDirectory: Bool {
+        itemType == .directory
+    }
+
     /// Computed: Has subproject metadata
     var hasMetadata: Bool {
         sourceLiveSetName != nil && sourceTrackId != nil
     }
 
-    init(path: String, category: FileCategory) {
+    init(path: String, projectPath: String? = nil, category: FileCategory, itemType: ItemType? = nil, isParsed: Bool = false) {
         self.path = path
+        self.projectPath = projectPath
         self.category = category
-        self.liveVersion = "Unknown"
+        self.itemType = itemType ?? ItemType.from(path: path, isDirectory: false)
         self.lastUpdated = Date()
-        self.isParsed = false
+        self.isParsed = isParsed
         self.autoVersionEnabled = true
 
         // Extract backup timestamp if this is a backup
@@ -143,26 +204,35 @@ nonisolated struct LiveSet: Codable, Identifiable, FetchableRecord, PersistableR
 
     // MARK: - Associations
     static let project = belongsTo(Project.self)
-    static let tracks = hasMany(LiveSetTrack.self)
+    static let tracks = hasMany(LiveSetTrack.self, using: LiveSetTrack.projectItemForeignKey)
 
     var project: QueryInterfaceRequest<Project> {
-        request(for: LiveSet.project)
+        request(for: ProjectItem.project)
     }
 
     var tracks: QueryInterfaceRequest<LiveSetTrack> {
-        request(for: LiveSet.tracks)
+        request(for: ProjectItem.tracks)
     }
 }
+
+// MARK: - Type alias for backwards compatibility during migration
+typealias LiveSet = ProjectItem
 
 /// Represents a track in an Ableton Live Set
 struct LiveSetTrack: Codable, Identifiable, FetchableRecord, PersistableRecord, Sendable {
     static let databaseTableName = "tracks"
 
-    /// Compound primary key: liveSetPath + trackId
-    var id: String { "\(liveSetPath ?? ""):\(trackId)" }
+    /// Compound primary key: projectItemPath + trackId
+    var id: String { "\(projectItemPath ?? ""):\(trackId)" }
 
-    /// Foreign key to LiveSet
-    var liveSetPath: String?
+    /// Foreign key to ProjectItem
+    var projectItemPath: String?
+
+    /// Alias for backwards compatibility
+    var liveSetPath: String? {
+        get { projectItemPath }
+        set { projectItemPath = newValue }
+    }
 
     /// Ableton track ID (unique within a LiveSet)
     var trackId: Int
@@ -289,10 +359,16 @@ struct LiveSetTrack: Codable, Identifiable, FetchableRecord, PersistableRecord, 
     }
 
     // MARK: - Associations
-    static let liveSet = belongsTo(LiveSet.self)
+    static let projectItemForeignKey = ForeignKey(["projectItemPath"])
+    static let projectItem = belongsTo(ProjectItem.self, using: projectItemForeignKey)
 
-    var liveSet: QueryInterfaceRequest<LiveSet> {
-        request(for: LiveSetTrack.liveSet)
+    var projectItem: QueryInterfaceRequest<ProjectItem> {
+        request(for: LiveSetTrack.projectItem)
+    }
+
+    // Alias for backwards compatibility
+    var liveSet: QueryInterfaceRequest<ProjectItem> {
+        projectItem
     }
 }
 

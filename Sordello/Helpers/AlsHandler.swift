@@ -19,38 +19,38 @@ nonisolated struct AlsHandler: FileHandler {
 
     // MARK: - Core Parsing
 
-    /// Parse a LiveSet and return updated model + tracks
+    /// Parse a ProjectItem (LiveSet) and return updated model + tracks
     /// Returns nil if parsing fails
-    static func parse(_ liveSet: LiveSet) -> (file: LiveSet, children: [any Sendable])? {
-        let alsUrl = URL(fileURLWithPath: liveSet.path)
+    static func parse(_ item: ProjectItem) -> (item: ProjectItem, children: [any Sendable])? {
+        let alsUrl = URL(fileURLWithPath: item.path)
 
         let parser = AlsParser()
         let result = parser.parse(at: alsUrl)
         guard result.success else {
-            print("AlsHandler: Failed to parse \(liveSet.name): \(result.errorMessage ?? "unknown error")")
+            print("AlsHandler: Failed to parse \(item.name): \(result.errorMessage ?? "unknown error")")
             return nil
         }
 
-        var updatedLiveSet = liveSet
-        updatedLiveSet.liveVersion = result.liveVersion ?? "Unknown"
-        updatedLiveSet.isParsed = true
-        updatedLiveSet.lastUpdated = Date()
+        var updatedItem = item
+        updatedItem.liveVersion = result.liveVersion ?? "Unknown"
+        updatedItem.isParsed = true
+        updatedItem.lastUpdated = Date()
 
-        let tracks = createTracks(from: result.tracks, liveSetPath: liveSet.path)
-        return (updatedLiveSet, tracks)
+        let tracks = createTracks(from: result.tracks, liveSetPath: item.path)
+        return (updatedItem, tracks)
     }
 
-    /// Parse a LiveSet and save to database
+    /// Parse a ProjectItem and save to database
     /// Returns true if successful
-    static func parseAndSave(_ liveSet: LiveSet, to db: ProjectDatabase) -> Bool {
-        guard let (updatedLiveSet, children) = parse(liveSet),
+    static func parseAndSave(_ item: ProjectItem, to db: ProjectDatabase) -> Bool {
+        guard let (updatedItem, children) = parse(item),
               let tracks = children as? [LiveSetTrack] else {
             return false
         }
 
         do {
-            try db.saveLiveSetWithTracks(updatedLiveSet, tracks: tracks)
-            print("AlsHandler: Parsed \(tracks.count) tracks from \(liveSet.name) (Live \(updatedLiveSet.liveVersion))")
+            try db.saveProjectItemWithTracks(updatedItem, tracks: tracks)
+            print("AlsHandler: Parsed \(tracks.count) tracks from \(item.name) (Live \(updatedItem.liveVersion ?? "Unknown"))")
             return true
         } catch {
             print("AlsHandler: Failed to save parsed LiveSet: \(error)")

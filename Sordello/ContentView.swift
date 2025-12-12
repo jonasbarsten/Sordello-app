@@ -10,7 +10,8 @@ import GRDBQuery
 
 struct ContentView: View {
     @State private var selectedProject: Project?
-    @State private var selectedLiveSet: LiveSet?
+    @State private var selectedProjectContent: LiveSet?
+    @State private var selectedFileSystemItem: LazyFileSystemItem?
     @State private var isInspectorVisible = false
 
     var body: some View {
@@ -20,8 +21,9 @@ struct ContentView: View {
             if let projectPath = selectedProject?.path,
                ProjectManager.shared.openProjectPaths.contains(projectPath),
                let db = ProjectManager.shared.database(forProjectPath: projectPath)?.dbQueue {
-                LiveSetListView(projectPath: projectPath, selection: $selectedLiveSet)
-                    .databaseContext(.readOnly { db })
+                WholeTreeLazyTestView(projectPath: projectPath, selection: $selectedFileSystemItem)
+//                ProjectContentListView(projectPath: projectPath, selection: $selectedProjectContent)
+//                    .databaseContext(.readOnly { db })
             } else if selectedProject?.path != nil {
                 ProgressView("Loading...")
             } else {
@@ -32,10 +34,16 @@ struct ContentView: View {
             if let projectPath = selectedProject?.path,
                let db = ProjectManager.shared.database(forProjectPath: projectPath)?.dbQueue {
                 NavigationStack {
-                    if let liveSet = selectedLiveSet {
-                        ProjectFileDetailView(liveSet: liveSet)
+//                    if let projectContent = selectedProjectContent {
+//                        ProjectFileDetailView(liveSet: projectContent)
+//                    } else {
+//                        Text("Select a Live Set")
+//                            .foregroundColor(.secondary)
+//                    }
+                    if let fileSystemItem = selectedFileSystemItem {
+                        FileSystemItemDetailView(fileSystemItem: fileSystemItem)
                     } else {
-                        Text("Select a Live Set")
+                        Text("Select an item in the list")
                             .foregroundColor(.secondary)
                     }
                 }
@@ -46,8 +54,8 @@ struct ContentView: View {
             }
         }
         .inspector(isPresented: $isInspectorVisible) {
-            if let liveSet = selectedLiveSet {
-                LiveSetInspectorView(liveSet: liveSet)
+            if let projectContent = selectedProjectContent {
+                LiveSetInspectorView(liveSet: projectContent)
             } else {
                 Text("Select a Live Set")
                     .foregroundColor(.secondary)
@@ -80,7 +88,8 @@ struct ContentView: View {
             }
         }
         .onChange(of: selectedProject) { _, _ in
-            selectedLiveSet = nil
+            selectedProjectContent = nil
+            selectedFileSystemItem = nil
         }
         .navigationTitle(selectedProject?.name ?? "Sordello")
     }

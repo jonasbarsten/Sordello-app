@@ -96,18 +96,18 @@ final class ProjectManager {
     /// Open a project folder using NSOpenPanel
     func openProject() {
         let panel = NSOpenPanel()
-        panel.title = "Open Ableton Live Project"
+        panel.title = "Open or create a Sordello Project"
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
-        panel.message = "Select an Ableton Live Project folder"
+        panel.message = "Select any folder"
 
         if panel.runModal() == .OK, let url = panel.url {
             // Validate it's an Ableton Live Project folder
-            guard FileScanner.isValidAbletonProject(at: url) else {
-                showInvalidProjectAlert(for: url)
-                return
-            }
+//            guard FileScanner.isValidAbletonProject(at: url) else {
+//                showInvalidProjectAlert(for: url)
+//                return
+//            }
 
             // Create security-scoped bookmark for the directory (gives us write access)
             BookmarkManager.shared.saveBookmark(for: url)
@@ -182,13 +182,18 @@ final class ProjectManager {
         if accessing { folderUrl.stopAccessingSecurityScopedResource() }
 
         // Watch the folder for changes
+        // Note: FileWatcher now reports specific changed paths, but we still do full incremental scan
+        // TODO: Use the specific paths for targeted updates (see TODO.md)
         let projectPath = folderUrl.path
-        FileWatcher.shared.watchFile(at: projectPath) {
-            // Small delay to let file operations complete
-            Task {
-                try? await Task.sleep(for: .milliseconds(500))
-                ProjectManager.shared.reloadProject(folderPath: projectPath)
+        FileWatcher.shared.watch(at: projectPath) { changes in
+            // Log what changed (useful for debugging)
+            let alsChanges = changes.filter { $0.path.lowercased().hasSuffix(".als") }
+            if !alsChanges.isEmpty {
+                print("FileWatcher: \(alsChanges.count) .als file(s) changed")
             }
+
+            // For now, still do full incremental scan
+            ProjectManager.shared.reloadProject(folderPath: projectPath)
         }
     }
 
@@ -319,31 +324,60 @@ final class ProjectManager {
         }
     }
 
-    /// Create a version of a LiveSet
-    func createVersion(of liveSet: LiveSet) {
-        guard let projectPath = liveSet.projectPath,
+    /// Create a version of a ProjectItem
+    func createVersion(of projectItem: ProjectItem) {
+        guard let projectPath = projectItem.projectPath,
               let vc = versionControls[projectPath],
               let projectDb = projectDatabases[projectPath] else { return }
 
         // Generate version path
-        let versionPath = vc.versionPath(for: liveSet.path)
+        let versionPath = vc.versionPath(for: projectItem.path)
 
         // Insert a copy immediately so it appears in UI
-        var copy = liveSet
+        var copy = projectItem
         copy.path = versionPath
         copy.category = .version
-        copy.parentLiveSetPath = liveSet.path
+        copy.parentItemPath = projectItem.path
         copy.isParsed = false
-        try? projectDb.insertLiveSet(copy)
+        try? projectDb.insertProjectItem(copy)
 
-        // Create file on disk in background, then trigger reload
+        // Create file on disk in background (FileWatcher will trigger reload)
         Task {
             do {
-                try await vc.createCopyAsync(of: liveSet.path, to: versionPath)
-                self.reloadProject(folderPath: projectPath)
+                try await vc.createCopyAsync(of: projectItem.path, to: versionPath)
             } catch {
                 print("Failed to create version: \(error.localizedDescription)")
             }
+        }
+    }
+
+    /// Create a version of any file by path, ensuring it's tracked in the database first
+    func createVersionByPath(filePath: String, projectPath: String) {
+        guard let projectDb = projectDatabases[projectPath] else {
+            print("No database found for project: \(projectPath)")
+            return
+        }
+
+        do {
+            // Check if file is already tracked
+            var projectItem = try projectDb.fetchProjectItem(path: filePath)
+
+            if projectItem == nil {
+                // Not tracked yet - create a new ProjectItem
+                let itemType = ItemType.from(path: filePath, isDirectory: false)
+                var newItem = ProjectItem(path: filePath, projectPath: projectPath, category: .main, itemType: itemType)
+                newItem.fileModificationDate = FileScanner.getFileModificationDate(for: URL(fileURLWithPath: filePath))
+                try projectDb.insertProjectItem(newItem)
+                projectItem = newItem
+                print("Added file to database: \(URL(fileURLWithPath: filePath).lastPathComponent)")
+            }
+
+            // Now create the version using existing method
+            if let item = projectItem {
+                createVersion(of: item)
+            }
+        } catch {
+            print("Failed to create version: \(error.localizedDescription)")
         }
     }
 
@@ -361,7 +395,7 @@ final class ProjectManager {
         var placeholder = originalLiveSet
         placeholder.path = outputPath
         placeholder.category = .liveSetTrackVersion
-        placeholder.parentLiveSetPath = liveSetPath
+        placeholder.parentItemPath = liveSetPath
         placeholder.sourceLiveSetName = originalLiveSet.name
         placeholder.sourceTrackId = trackId
         placeholder.sourceTrackName = trackName
@@ -394,7 +428,7 @@ final class ProjectManager {
 
             if result.success {
                 print("Created track version: \(outputUrl.lastPathComponent) (\(result.tracksExtracted) tracks)")
-                self.reloadProject(folderPath: projectPath)
+                // FileWatcher will trigger reload automatically
             } else {
                 print("Failed to create track version: \(result.error ?? "unknown error")")
                 // Remove placeholder on failure

@@ -80,13 +80,13 @@ struct SingleLiveSetRequest: ValueObservationQueryable {
 // MARK: - Track Requests
 
 struct RootTracksRequest: ValueObservationQueryable {
-    let liveSetPath: String
+    let projectItemPath: String
 
     static var defaultValue: [LiveSetTrack] { [] }
 
     func fetch(_ db: Database) throws -> [LiveSetTrack] {
         try LiveSetTrack
-            .filter(Column("liveSetPath") == liveSetPath)
+            .filter(Column("projectItemPath") == projectItemPath)
             .filter(Column("parentGroupId") == nil)
             .order(Column("sortIndex"))
             .fetchAll(db)
@@ -94,14 +94,14 @@ struct RootTracksRequest: ValueObservationQueryable {
 }
 
 struct ChildTracksRequest: ValueObservationQueryable {
-    let liveSetPath: String
+    let projectItemPath: String
     let parentGroupId: Int
 
     static var defaultValue: [LiveSetTrack] { [] }
 
     func fetch(_ db: Database) throws -> [LiveSetTrack] {
         try LiveSetTrack
-            .filter(Column("liveSetPath") == liveSetPath)
+            .filter(Column("projectItemPath") == projectItemPath)
             .filter(Column("parentGroupId") == parentGroupId)
             .order(Column("sortIndex"))
             .fetchAll(db)
@@ -109,13 +109,13 @@ struct ChildTracksRequest: ValueObservationQueryable {
 }
 
 struct AllTracksRequest: ValueObservationQueryable {
-    let liveSetPath: String
+    let projectItemPath: String
 
     static var defaultValue: [LiveSetTrack] { [] }
 
     func fetch(_ db: Database) throws -> [LiveSetTrack] {
         try LiveSetTrack
-            .filter(Column("liveSetPath") == liveSetPath)
+            .filter(Column("projectItemPath") == projectItemPath)
             .order(Column("sortIndex"))
             .fetchAll(db)
     }

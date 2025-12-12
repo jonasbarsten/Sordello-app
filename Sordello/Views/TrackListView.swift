@@ -13,7 +13,7 @@ struct TrackListView: View {
 
     init(liveSet: LiveSet) {
         self.liveSet = liveSet
-        _rootTracks = Query(constant: RootTracksRequest(liveSetPath: liveSet.path))
+        _rootTracks = Query(constant: RootTracksRequest(projectItemPath: liveSet.path))
     }
 
     var body: some View {

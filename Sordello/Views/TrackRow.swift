@@ -30,7 +30,7 @@ struct TrackRow: View {
         self.liveSetPath = liveSetPath
         self.projectPath = projectPath
         self.depth = depth
-        _children = Query(constant: ChildTracksRequest(liveSetPath: liveSetPath, parentGroupId: track.trackId))
+        _children = Query(constant: ChildTracksRequest(projectItemPath: liveSetPath, parentGroupId: track.trackId))
 
         let liveSetName = URL(fileURLWithPath: liveSetPath).deletingPathExtension().lastPathComponent
         _trackVersions = Query(constant: TrackVersionsRequest(
@@ -279,7 +279,7 @@ struct TrackVersionsPopover: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 4) {
                         ForEach(versions, id: \.path) { version in
-                            NavigationLink(destination: ProjectFileDetailView(liveSet: version)) {
+                            NavigationLink(destination: LiveSetDetailView(liveSet: version)) {
                                 TrackVersionRow(version: version)
                             }
                         }

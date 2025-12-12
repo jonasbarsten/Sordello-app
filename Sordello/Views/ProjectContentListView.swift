@@ -7,7 +7,7 @@ import SwiftUI
 import GRDB
 import GRDBQuery
 
-struct LiveSetListView: View {
+struct ProjectContentListView: View {
     let projectPath: String
     @Binding var selection: LiveSet?
 
@@ -41,7 +41,7 @@ struct LiveSetListView: View {
     private var orphanVersions: [LiveSet] {
         let mainPaths = Set(mainLiveSets.map { $0.path })
         return allVersions.filter { version in
-            guard let parentPath = version.parentLiveSetPath else { return true }
+            guard let parentPath = version.parentItemPath else { return true }
             return !mainPaths.contains(parentPath)
         }
     }
@@ -104,7 +104,7 @@ struct LiveSetListView: View {
     }
 
     private func versionsFor(_ liveSet: LiveSet) -> [LiveSet] {
-        allVersions.filter { $0.parentLiveSetPath == liveSet.path }
+        allVersions.filter { $0.parentItemPath == liveSet.path }
     }
 
     private func toggleExpanded(_ path: String) {
@@ -117,5 +117,5 @@ struct LiveSetListView: View {
 }
 
 #Preview {
-    LiveSetListView(projectPath: "/Users/test/My Song Project", selection: .constant(nil))
+    ProjectContentListView(projectPath: "/Users/test/My Song Project", selection: .constant(nil))
 }

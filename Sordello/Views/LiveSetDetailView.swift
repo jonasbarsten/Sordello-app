@@ -5,7 +5,7 @@
 
 import SwiftUI
 
-struct ProjectFileDetailView: View {
+struct LiveSetDetailView: View {
     let liveSet: LiveSet
 
     var body: some View {
@@ -22,5 +22,5 @@ struct ProjectFileDetailView: View {
 }
 
 #Preview {
-    ProjectFileDetailView(liveSet: LiveSet(path: "/test/My Song.als", category: .main))
+    LiveSetDetailView(liveSet: LiveSet(path: "/test/My Song.als", category: .main))
 }

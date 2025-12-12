@@ -140,7 +140,14 @@ When searching for documentation or APIs, ALWAYS search for iOS 26 / macOS 26, N
 ### Requirements
 - macOS 26.1+ (required)
 - Xcode 16+
-- Swift 6.0+
+- Swift 6.2+
+
+### Swift 6.2 Concurrency
+**IMPORTANT:** Swift 6.2 defaults to `@MainActor` isolation for everything. This means:
+- All types, methods, and functions are implicitly `@MainActor` unless marked otherwise
+- You MUST add `nonisolated` to static methods, computed properties, or functions that need to run off the main actor
+- GRDB callbacks and Sendable types often need `nonisolated` annotations
+- Database operations in GRDB should be `nonisolated` since they can run on background threads
 
 ### Data Layer
 - **GRDB** for SQLite database persistence (NOT SwiftData)
