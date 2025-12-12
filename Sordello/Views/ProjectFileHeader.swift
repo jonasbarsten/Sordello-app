@@ -7,7 +7,6 @@ import SwiftUI
 import AppKit
 
 struct ProjectFileHeader: View {
-    @Environment(AppState.self) private var appState
     let liveSet: LiveSet
     @State private var groupCount: Int = 0
     @State private var modifiedCount: Int = 0
@@ -282,9 +281,6 @@ struct ProjectFileHeader: View {
             // Reparse the original LiveSet from disk to reset track state
             ProjectManager.shared.parseLiveSet(liveSet)
 
-            // Navigate to the new version in the sidebar
-            appState.selectedLiveSetPath = outputPath
-
             showOpenPrompt = true
         } else {
             saveError = result.error ?? "Unknown error"
@@ -295,10 +291,8 @@ struct ProjectFileHeader: View {
 
 #Preview("Main LiveSet") {
     ProjectFileHeader(liveSet: LiveSet(path: "/test/My Song.als", category: .main))
-        .environment(AppState())
 }
 
 #Preview("Subproject") {
     ProjectFileHeader(liveSet: LiveSet(path: "/test/.subproject-My Song-Drums-2025-12-09T14-30-00.als", category: .liveSetTrackVersion))
-        .environment(AppState())
 }
