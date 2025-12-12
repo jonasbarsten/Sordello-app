@@ -6,14 +6,16 @@
 //
 
 import SwiftUI
-import SwiftData
+import GRDB
 
-// MARK: - Track Inspector (SwiftData)
+// MARK: - Track Inspector (GRDB)
 
 /// Inspector panel showing detailed track information
-struct SDTrackInspectorView: View {
-    let track: SDTrack
-    @Environment(\.modelContext) private var modelContext
+struct TrackInspectorView: View {
+    @Environment(AppState.self) private var appState
+    let track: LiveSetTrack
+    let liveSetPath: String
+    let projectPath: String?
 
     var body: some View {
         ScrollView {
@@ -121,19 +123,19 @@ struct SDTrackInspectorView: View {
                 .foregroundColor(.secondary)
 
             if let audioIn = track.audioInput {
-                SDRoutingRow(label: "Audio In", routing: audioIn, icon: "arrow.right.circle")
+                RoutingRow(label: "Audio In", routing: audioIn, icon: "arrow.right.circle")
             }
 
             if let audioOut = track.audioOutput {
-                SDRoutingRow(label: "Audio Out", routing: audioOut, icon: "arrow.left.circle")
+                RoutingRow(label: "Audio Out", routing: audioOut, icon: "arrow.left.circle")
             }
 
             if let midiIn = track.midiInput {
-                SDRoutingRow(label: "MIDI In", routing: midiIn, icon: "pianokeys")
+                RoutingRow(label: "MIDI In", routing: midiIn, icon: "pianokeys")
             }
 
             if let midiOut = track.midiOutput {
-                SDRoutingRow(label: "MIDI Out", routing: midiOut, icon: "pianokeys")
+                RoutingRow(label: "MIDI Out", routing: midiOut, icon: "pianokeys")
             }
         }
     }
@@ -141,24 +143,27 @@ struct SDTrackInspectorView: View {
     // MARK: - Group Section
 
     private var childCount: Int {
-        guard let liveSetPath = track.liveSet?.path else { return 0 }
         let parentId = track.trackId
-        let predicate = #Predicate<SDTrack> { t in
-            t.liveSet?.path == liveSetPath && t.parentGroupId == parentId
+        guard let projectPath = projectPath,
+              let projectDb = ProjectManager.shared.database(forProjectPath: projectPath) else { return 0 }
+        do {
+            let children = try projectDb.fetchChildTracks(forLiveSetPath: liveSetPath, parentGroupId: parentId)
+            return children.count
+        } catch {
+            return 0
         }
-        let descriptor = FetchDescriptor<SDTrack>(predicate: predicate)
-        return (try? modelContext.fetchCount(descriptor)) ?? 0
     }
 
-    private func countByType(_ type: SDTrackType) -> Int {
-        guard let liveSetPath = track.liveSet?.path else { return 0 }
+    private func countByType(_ type: TrackType) -> Int {
         let parentId = track.trackId
-        let typeRaw = type.rawValue
-        let predicate = #Predicate<SDTrack> { t in
-            t.liveSet?.path == liveSetPath && t.parentGroupId == parentId && t.typeRaw == typeRaw
+        guard let projectPath = projectPath,
+              let projectDb = ProjectManager.shared.database(forProjectPath: projectPath) else { return 0 }
+        do {
+            let children = try projectDb.fetchChildTracks(forLiveSetPath: liveSetPath, parentGroupId: parentId)
+            return children.filter { $0.type == type }.count
+        } catch {
+            return 0
         }
-        let descriptor = FetchDescriptor<SDTrack>(predicate: predicate)
-        return (try? modelContext.fetchCount(descriptor)) ?? 0
     }
 
     private var groupSection: some View {
@@ -223,11 +228,11 @@ struct SDTrackInspectorView: View {
     // MARK: - Helpers
 
     private func navigateToSubproject(path: String) {
-        UIState.shared.selectedLiveSetPath = path
-        UIState.shared.selectedTrackId = nil
+        // Push onto detail navigation stack for automatic back button
+        appState.pushDetail(.liveSetByPath(path: path))
     }
 
-    private func iconForTrackType(_ type: SDTrackType) -> String {
+    private func iconForTrackType(_ type: TrackType) -> String {
         switch type {
         case .audio: return "waveform"
         case .midi: return "pianokeys"
@@ -236,7 +241,7 @@ struct SDTrackInspectorView: View {
         }
     }
 
-    private func colorForTrackType(_ type: SDTrackType) -> Color {
+    private func colorForTrackType(_ type: TrackType) -> Color {
         switch type {
         case .audio: return .orange
         case .midi: return .purple
@@ -298,9 +303,9 @@ struct PropertyRow: View {
     }
 }
 
-struct SDRoutingRow: View {
+struct RoutingRow: View {
     let label: String
-    let routing: SDTrack.RoutingInfo
+    let routing: LiveSetTrack.RoutingInfo
     let icon: String
 
     var body: some View {
@@ -333,14 +338,15 @@ struct SDRoutingRow: View {
     }
 }
 
-// MARK: - LiveSet Inspector (SwiftData)
+// MARK: - LiveSet Inspector (GRDB)
 
 /// Inspector panel showing detailed LiveSet information
-struct SDLiveSetInspectorView: View {
-    let liveSet: SDLiveSet
-    @Environment(\.modelContext) private var modelContext
+struct LiveSetInspectorView: View {
+    @Environment(AppState.self) private var appState
+    let liveSet: LiveSet
     @State private var editableComment: String = ""
     @State private var isEditingComment: Bool = false
+    @State private var autoVersionEnabled: Bool = true
 
     var body: some View {
         ScrollView {
@@ -351,7 +357,12 @@ struct SDLiveSetInspectorView: View {
                 Divider()
                 trackSummarySection
 
-                if liveSet.category == .subproject, liveSet.hasMetadata {
+                if liveSet.category == .main {
+                    Divider()
+                    versioningSection
+                }
+
+                if liveSet.category == .liveSetTrackVersion, liveSet.hasMetadata {
                     Divider()
                     subprojectSection
                 }
@@ -362,6 +373,12 @@ struct SDLiveSetInspectorView: View {
         }
         .frame(minWidth: 250, idealWidth: 280)
         .background(Color(nsColor: .controlBackgroundColor))
+        .onAppear {
+            autoVersionEnabled = liveSet.autoVersionEnabled
+        }
+        .onChange(of: liveSet.path) { _, _ in
+            autoVersionEnabled = liveSet.autoVersionEnabled
+        }
     }
 
     // MARK: - Header Section
@@ -473,30 +490,36 @@ struct SDLiveSetInspectorView: View {
     // MARK: - Track Summary Section
 
     private var totalTrackCount: Int {
-        let liveSetPath = liveSet.path
-        let predicate = #Predicate<SDTrack> { $0.liveSet?.path == liveSetPath }
-        let descriptor = FetchDescriptor<SDTrack>(predicate: predicate)
-        return (try? modelContext.fetchCount(descriptor)) ?? 0
+        guard let projectPath = liveSet.projectPath,
+              let projectDb = ProjectManager.shared.database(forProjectPath: projectPath) else { return 0 }
+        do {
+            let tracks = try projectDb.fetchTracks(forLiveSetPath: liveSet.path)
+            return tracks.count
+        } catch {
+            return 0
+        }
     }
 
-    private func trackCountByType(_ type: SDTrackType) -> Int {
-        let liveSetPath = liveSet.path
-        let typeRaw = type.rawValue
-        let predicate = #Predicate<SDTrack> { track in
-            track.liveSet?.path == liveSetPath && track.typeRaw == typeRaw
+    private func trackCountByType(_ type: TrackType) -> Int {
+        guard let projectPath = liveSet.projectPath,
+              let projectDb = ProjectManager.shared.database(forProjectPath: projectPath) else { return 0 }
+        do {
+            let tracks = try projectDb.fetchTracks(forLiveSetPath: liveSet.path)
+            return tracks.filter { $0.type == type }.count
+        } catch {
+            return 0
         }
-        let descriptor = FetchDescriptor<SDTrack>(predicate: predicate)
-        return (try? modelContext.fetchCount(descriptor)) ?? 0
     }
 
     private var versionCount: Int {
-        let versionCategory = SDLiveSetCategory.version.rawValue
-        let parentPath = liveSet.path
-        let predicate = #Predicate<SDLiveSet> { ls in
-            ls.categoryRaw == versionCategory && ls.parentLiveSetPath == parentPath
+        guard let projectPath = liveSet.projectPath,
+              let projectDb = ProjectManager.shared.database(forProjectPath: projectPath) else { return 0 }
+        do {
+            let versions = try projectDb.fetchVersionLiveSets(forParentPath: liveSet.path)
+            return versions.count
+        } catch {
+            return 0
         }
-        let descriptor = FetchDescriptor<SDLiveSet>(predicate: predicate)
-        return (try? modelContext.fetchCount(descriptor)) ?? 0
     }
 
     private var trackSummarySection: some View {
@@ -531,6 +554,47 @@ struct SDLiveSetInspectorView: View {
         }
     }
 
+    // MARK: - Versioning Section
+
+    private var versioningSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Versioning")
+                .font(.headline)
+                .foregroundColor(.secondary)
+
+            Toggle(isOn: $autoVersionEnabled) {
+                HStack {
+                    Image(systemName: "clock.arrow.circlepath")
+                        .frame(width: 20)
+                        .foregroundColor(.secondary)
+                    Text("Auto-version on save")
+                }
+                .font(.callout)
+            }
+            .toggleStyle(.switch)
+            .onChange(of: autoVersionEnabled) { _, newValue in
+                saveAutoVersionSetting(enabled: newValue)
+            }
+
+            Text("When enabled, a new version is automatically created each time this Live Set is saved.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    private func saveAutoVersionSetting(enabled: Bool) {
+        guard let projectPath = liveSet.projectPath,
+              let projectDb = ProjectManager.shared.database(forProjectPath: projectPath) else { return }
+
+        var updatedLiveSet = liveSet
+        updatedLiveSet.autoVersionEnabled = enabled
+        do {
+            try projectDb.updateLiveSet(updatedLiveSet)
+        } catch {
+            print("Failed to save auto-version setting: \(error)")
+        }
+    }
+
     // MARK: - Subproject Section
 
     private var subprojectSection: some View {
@@ -540,8 +604,8 @@ struct SDLiveSetInspectorView: View {
                 .foregroundColor(.secondary)
 
             PropertyRow(label: "Live Set", value: liveSet.sourceLiveSetName ?? "", icon: "doc.fill")
-            PropertyRow(label: "Group", value: liveSet.sourceGroupName ?? "", icon: "folder.fill")
-            PropertyRow(label: "Group ID", value: "\(liveSet.sourceGroupId ?? 0)", icon: "number")
+            PropertyRow(label: "Track", value: liveSet.sourceTrackName ?? "", icon: "folder.fill")
+            PropertyRow(label: "Track ID", value: "\(liveSet.sourceTrackId ?? 0)", icon: "number")
             if let extractedAt = liveSet.extractedAt {
                 PropertyRow(label: "Extracted", value: formatDate(extractedAt), icon: "calendar")
             }
@@ -556,26 +620,19 @@ struct SDLiveSetInspectorView: View {
     }
 
     private func navigateToSource() {
-        guard let projectPath = liveSet.project?.path,
-              let sourceName = liveSet.sourceLiveSetName else { return }
+        guard let projectPath = liveSet.projectPath,
+              let sourceName = liveSet.sourceLiveSetName,
+              let projectDb = ProjectManager.shared.database(forProjectPath: projectPath) else { return }
 
         // Find source LiveSet by name
-        let mainCategory = SDLiveSetCategory.main.rawValue
-        let predicate = #Predicate<SDLiveSet> { ls in
-            ls.project?.path == projectPath && ls.categoryRaw == mainCategory
-        }
-        let descriptor = FetchDescriptor<SDLiveSet>(predicate: predicate)
+        do {
+            let mainSets = try projectDb.fetchMainLiveSets()
+            guard let source = mainSets.first(where: { $0.name == sourceName }) else { return }
 
-        guard let mainSets = try? modelContext.fetch(descriptor),
-              let source = mainSets.first(where: { $0.name == sourceName }) else { return }
-
-        UIState.shared.selectedLiveSetPath = source.path
-
-        // Select the source group track
-        if let groupId = liveSet.sourceGroupId {
-            UIState.shared.selectedTrackId = groupId
-        } else {
-            UIState.shared.selectedTrackId = nil
+            // Select the source LiveSet (this clears detail navigation automatically)
+            appState.selectedLiveSet = source
+        } catch {
+            print("Error navigating to source: \(error)")
         }
     }
 
@@ -611,19 +668,19 @@ struct SDLiveSetInspectorView: View {
         return formatter.string(from: date)
     }
 
-    private func iconForCategory(_ category: SDLiveSetCategory) -> String {
+    private func iconForCategory(_ category: FileCategory) -> String {
         switch category {
         case .main: return "doc.fill"
-        case .subproject: return "doc.badge.gearshape.fill"
+        case .liveSetTrackVersion: return "doc.badge.gearshape.fill"
         case .version: return "clock.arrow.circlepath"
         case .backup: return "clock.fill"
         }
     }
 
-    private func colorForCategory(_ category: SDLiveSetCategory) -> Color {
+    private func colorForCategory(_ category: FileCategory) -> Color {
         switch category {
         case .main: return .blue
-        case .subproject: return .purple
+        case .liveSetTrackVersion: return .purple
         case .version: return .orange
         case .backup: return .gray
         }
@@ -631,18 +688,22 @@ struct SDLiveSetInspectorView: View {
 }
 
 #Preview("Track Inspector") {
-    SDTrackInspectorView(
-        track: SDTrack(
+    TrackInspectorView(
+        track: LiveSetTrack(
             trackId: 15,
             name: "Test Track",
             type: .audio,
             parentGroupId: nil
-        )
+        ),
+        liveSetPath: "/test/path.als",
+        projectPath: "/test"
     )
+    .environment(AppState())
 }
 
 #Preview("LiveSet Inspector") {
-    SDLiveSetInspectorView(
-        liveSet: SDLiveSet(path: "/test/path.als", category: .main)
+    LiveSetInspectorView(
+        liveSet: LiveSet(path: "/test/path.als", category: .main)
     )
+    .environment(AppState())
 }

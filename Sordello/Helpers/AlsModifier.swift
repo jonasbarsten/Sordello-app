@@ -9,14 +9,16 @@ import Foundation
 
 /// Modifies existing .als files and saves as new versions.
 ///
-/// This class is distinct from `AlsExtractor` which extracts portions of an .als file
+/// This struct is distinct from `AlsExtractor` which extracts portions of an .als file
 /// to create subprojects. `AlsModifier` takes an existing .als file, applies modifications
 /// (like track name changes), and saves to a new file - keeping the original unchanged.
 ///
 /// Use cases:
 /// - Renaming tracks and saving as a new version
 /// - Future: Modifying track colors, routing, etc.
-class AlsModifier {
+///
+/// Pure struct - no mutable state, safe to use on any thread
+struct AlsModifier {
 
     struct ModificationResult {
         let success: Bool

@@ -8,9 +8,9 @@
 import Foundation
 import Compression
 
-/// Extracts a group track and its children to a new .als file
-class AlsExtractor {
-    private(set) var errorMessage: String?
+/// Extracts tracks from .als files to new standalone .als files
+/// Pure struct - no mutable state, safe to use on any thread
+struct AlsExtractor {
 
     struct ExtractionResult {
         let success: Bool
@@ -19,8 +19,10 @@ class AlsExtractor {
         let error: String?
     }
 
-    /// Extract a group from an .als file to a new subproject file
-    func extractGroup(from inputPath: String, groupId: Int, to outputPath: String) -> ExtractionResult {
+    /// Extract any track (audio, MIDI, or group) from an .als file to a new file
+    /// For groups: includes all nested tracks
+    /// For audio/MIDI: just that single track
+    func extractTrack(from inputPath: String, trackId: Int, to outputPath: String) -> ExtractionResult {
         // Read and decompress the input file
         let inputUrl = URL(fileURLWithPath: inputPath)
         guard let compressedData = try? Data(contentsOf: inputUrl) else {
@@ -63,86 +65,93 @@ class AlsExtractor {
             }
         }
 
-        // Find the main group track
-        var groupTrackElement: XMLElement?
+        // Find the target track
+        var targetTrackElement: XMLElement?
+        var targetTrackType: String?
         for element in allTrackElements {
-            if element.name == "GroupTrack",
-               let idAttr = element.attribute(forName: "Id")?.stringValue,
-               Int(idAttr) == groupId {
-                groupTrackElement = element
+            if let idAttr = element.attribute(forName: "Id")?.stringValue,
+               Int(idAttr) == trackId {
+                targetTrackElement = element
+                targetTrackType = element.name
                 break
             }
         }
 
-        guard let mainGroup = groupTrackElement else {
-            return ExtractionResult(success: false, outputPath: nil, tracksExtracted: 0, error: "Group track with ID \(groupId) not found")
+        guard let targetTrack = targetTrackElement,
+              let trackType = targetTrackType else {
+            return ExtractionResult(success: false, outputPath: nil, tracksExtracted: 0, error: "Track with ID \(trackId) not found")
         }
 
-        let groupName = getTrackName(mainGroup)
-        print("Extracting group: \"\(groupName)\" (ID: \(groupId))")
+        let trackName = getTrackName(targetTrack)
+        print("Extracting track: \"\(trackName)\" (ID: \(trackId), Type: \(trackType))")
 
-        // Collect all group IDs to include (main group + nested groups)
-        var groupIdsToInclude = Set<Int>([groupId])
+        var tracksToInclude: [XMLElement] = []
+        var returnTracks: [XMLElement] = []
 
-        // Keep scanning until we find no new nested groups
-        var foundNew = true
-        while foundNew {
-            foundNew = false
-            for element in allTrackElements {
-                if element.name == "GroupTrack" {
-                    let nestedId = getTrackId(element)
-                    if groupIdsToInclude.contains(nestedId) { continue }
+        // Collect return tracks
+        for element in allTrackElements {
+            if element.name == "ReturnTrack" {
+                returnTracks.append(element)
+            }
+        }
 
-                    let parentId = getTrackGroupId(element)
-                    if groupIdsToInclude.contains(parentId) {
-                        groupIdsToInclude.insert(nestedId)
-                        foundNew = true
-                        print("  Found nested group: \"\(getTrackName(element))\" (ID: \(nestedId))")
+        if trackType == "GroupTrack" {
+            // For groups: include the group and all nested tracks
+            var groupIdsToInclude = Set<Int>([trackId])
+
+            // Keep scanning until we find no new nested groups
+            var foundNew = true
+            while foundNew {
+                foundNew = false
+                for element in allTrackElements {
+                    if element.name == "GroupTrack" {
+                        let nestedId = getTrackId(element)
+                        if groupIdsToInclude.contains(nestedId) { continue }
+
+                        let parentId = getTrackGroupId(element)
+                        if groupIdsToInclude.contains(parentId) {
+                            groupIdsToInclude.insert(nestedId)
+                            foundNew = true
+                            print("  Found nested group: \"\(getTrackName(element))\" (ID: \(nestedId))")
+                        }
                     }
                 }
             }
-        }
 
-        // Set the main group track to root level
-        setTrackGroupId(mainGroup, newGroupId: -1)
-        print("  Including: \(groupName) (GroupTrack, ID: \(groupId))")
+            // Set the main group track to root level
+            setTrackGroupId(targetTrack, newGroupId: -1)
+            tracksToInclude.append(targetTrack)
+            print("  Including: \(trackName) (GroupTrack, ID: \(trackId))")
 
-        // Collect child tracks and return tracks
-        var childTracks: [XMLElement] = []
-        var returnTracks: [XMLElement] = []
+            // Add all child tracks
+            for element in allTrackElements {
+                guard let tagName = element.name, tagName != "ReturnTrack" else { continue }
+                if element === targetTrack { continue }
 
-        for element in allTrackElements {
-            guard let tagName = element.name else { continue }
-
-            if tagName == "ReturnTrack" {
-                returnTracks.append(element)
-                continue
+                let trackGroupId = getTrackGroupId(element)
+                if groupIdsToInclude.contains(trackGroupId) {
+                    let childId = getTrackId(element)
+                    let childName = getTrackName(element)
+                    print("  Including: \(childName) (\(tagName), ID: \(childId))")
+                    tracksToInclude.append(element)
+                }
             }
-
-            // Skip the main group track (we already have it)
-            if element === mainGroup { continue }
-
-            let trackGroupId = getTrackGroupId(element)
-
-            // Include if this track belongs to any group in our hierarchy
-            if groupIdsToInclude.contains(trackGroupId) {
-                let trackId = getTrackId(element)
-                let trackName = getTrackName(element)
-                print("  Including: \(trackName) (\(tagName), ID: \(trackId))")
-                childTracks.append(element)
-            }
+        } else {
+            // For audio/MIDI tracks: just include that single track at root level
+            setTrackGroupId(targetTrack, newGroupId: -1)
+            tracksToInclude.append(targetTrack)
+            print("  Including: \(trackName) (\(trackType), ID: \(trackId))")
         }
 
         print("  Including \(returnTracks.count) return track(s)")
 
         // Remove all tracks from the original Tracks element
-        while let child = tracksElement.children?.first {
+        while tracksElement.children?.first != nil {
             tracksElement.removeChild(at: 0)
         }
 
-        // Add tracks in order: main group, children, return tracks
-        tracksElement.addChild(mainGroup.copy() as! XMLNode)
-        for track in childTracks {
+        // Add tracks in order: target track(s), return tracks
+        for track in tracksToInclude {
             tracksElement.addChild(track.copy() as! XMLNode)
         }
         for track in returnTracks {
@@ -169,12 +178,12 @@ class AlsExtractor {
         return ExtractionResult(
             success: true,
             outputPath: outputPath,
-            tracksExtracted: childTracks.count + 1,  // +1 for the group itself
+            tracksExtracted: tracksToInclude.count,
             error: nil
         )
     }
 
-    // MARK: - Helper Methods
+    // MARK: - Private Helper Methods
 
     private func getTrackId(_ element: XMLElement) -> Int {
         if let idAttr = element.attribute(forName: "Id")?.stringValue {
@@ -206,6 +215,33 @@ class AlsExtractor {
                 valueAttr.stringValue = String(newGroupId)
             }
         }
+
+        // If moving to root level (-1), route audio output to Master
+        if newGroupId == -1 {
+            setAudioOutputToMaster(element)
+        }
+    }
+
+    /// Set AudioOutputRouting to Master for tracks at root level
+    private func setAudioOutputToMaster(_ element: XMLElement) {
+        // Navigate to DeviceChain -> AudioOutputRouting
+        guard let deviceChain = element.elements(forName: "DeviceChain").first,
+              let audioOutputRouting = deviceChain.elements(forName: "AudioOutputRouting").first,
+              let target = audioOutputRouting.elements(forName: "Target").first else {
+            return
+        }
+
+        let oldTarget = target.attribute(forName: "Value")?.stringValue ?? "unknown"
+        target.attribute(forName: "Value")?.stringValue = "AudioOut/Master"
+
+        // Also update the display strings
+        if let upperDisplay = audioOutputRouting.elements(forName: "UpperDisplayString").first {
+            upperDisplay.attribute(forName: "Value")?.stringValue = "Master"
+        }
+        if let lowerDisplay = audioOutputRouting.elements(forName: "LowerDisplayString").first {
+            lowerDisplay.attribute(forName: "Value")?.stringValue = ""
+        }
+        print("  Fixed audio routing: \(oldTarget) → Master")
     }
 }
 
@@ -247,7 +283,7 @@ extension Data {
         // Header (10 bytes) + deflated data + CRC32 (4 bytes) + original size (4 bytes)
 
         // Gzip header
-        var header = Data([
+        let header = Data([
             0x1f, 0x8b,       // Magic number
             0x08,             // Compression method (deflate)
             0x00,             // Flags

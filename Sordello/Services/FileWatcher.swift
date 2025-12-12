@@ -12,12 +12,10 @@ class FileWatcher {
     static let shared = FileWatcher()
 
     private var watchers: [String: DispatchSourceFileSystemObject] = [:]
-    private var callbacks: [String: () -> Void] = [:]
-    private let queue = DispatchQueue(label: "com.byjoba.sordello.filewatcher")
 
     init() {}
 
-    /// Start watching a file for changes
+    /// Start watching a directory for changes
     func watchFile(at path: String, onChange: @escaping () -> Void) {
         // Stop existing watcher for this path
         stopWatching(path: path)
@@ -30,14 +28,13 @@ class FileWatcher {
 
         let source = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: fileDescriptor,
-            eventMask: [.write, .delete, .rename, .attrib],
-            queue: queue
+            eventMask: .write,
+            queue: DispatchQueue.main
         )
 
         source.setEventHandler {
-            DispatchQueue.main.async {
-                onChange()
-            }
+            print("File change detected: \(path)")
+            onChange()
         }
 
         source.setCancelHandler {
@@ -45,8 +42,7 @@ class FileWatcher {
         }
 
         watchers[path] = source
-        callbacks[path] = onChange
-        source.resume()
+        source.activate()
 
         print("FileWatcher: Now watching \(path)")
     }
@@ -56,7 +52,6 @@ class FileWatcher {
         if let source = watchers[path] {
             source.cancel()
             watchers.removeValue(forKey: path)
-            callbacks.removeValue(forKey: path)
             print("FileWatcher: Stopped watching \(path)")
         }
     }
@@ -67,6 +62,5 @@ class FileWatcher {
             source.cancel()
         }
         watchers.removeAll()
-        callbacks.removeAll()
     }
 }

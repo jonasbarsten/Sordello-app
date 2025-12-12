@@ -10,20 +10,23 @@ import Foundation
 /// Lexicographic fractional indexing for ordering items.
 /// Allows inserting between items without reindexing others.
 /// Based on the approach used by Figma.
-enum FractionalIndex {
-    // Character set for indices: ONLY lowercase letters
-    // SwiftData uses locale-aware comparison where digits may sort after letters,
-    // and uppercase/lowercase are treated as equivalent. Using only lowercase
-    // letters guarantees consistent lexicographic ordering.
-    private static let chars = Array("abcdefghijklmnopqrstuvwxyz")
-    private static let base = chars.count  // 26
-
+///
+/// Uses only lowercase letters (a-z) for indices to ensure consistent
+/// lexicographic ordering across all locales.
+/// nonisolated: Pure algorithms with no mutable state, safe for background threads
+nonisolated enum FractionalIndex {
     /// Smallest valid index
     static let first = "a"
+    static let chars = K.lexIndex.chars
+    static let base = K.lexIndex.base
 
     /// Generate initial indices for n items, well-spaced
     static func generateInitialIndices(count: Int) -> [String] {
         guard count > 0 else { return [] }
+
+        // Local constants for background thread safety
+//        let chars: [Character] = Array("abcdefghijklmnopqrstuvwxyz")
+//        let base = 26
 
         // For small counts, use single characters spaced evenly
         if count <= 26 {
@@ -39,29 +42,22 @@ enum FractionalIndex {
         let useThreeChars = count > 676
         var indices: [String] = []
         for i in 0..<count {
-            indices.append(indexAtPosition(i, total: count, threeChars: useThreeChars))
+            let fraction = Double(i) / Double(count)
+
+            if useThreeChars {
+                let value = Int(fraction * Double(base * base * base))
+                let first = value / (base * base)
+                let second = (value / base) % base
+                let third = value % base
+                indices.append(String(chars[first]) + String(chars[second]) + String(chars[third]))
+            } else {
+                let value = Int(fraction * Double(base * base))
+                let first = value / base
+                let second = value % base
+                indices.append(String(chars[first]) + String(chars[second]))
+            }
         }
         return indices
-    }
-
-    /// Generate an index at a specific position in a range
-    private static func indexAtPosition(_ position: Int, total: Int, threeChars: Bool = false) -> String {
-        let fraction = Double(position) / Double(total)
-
-        if threeChars {
-            // Three character precision (26^3 = 17,576 positions)
-            let value = Int(fraction * Double(base * base * base))
-            let first = value / (base * base)
-            let second = (value / base) % base
-            let third = value % base
-            return String(chars[first]) + String(chars[second]) + String(chars[third])
-        } else {
-            // Two character precision (26^2 = 676 positions)
-            let value = Int(fraction * Double(base * base))
-            let first = value / base
-            let second = value % base
-            return String(chars[first]) + String(chars[second])
-        }
     }
 
     /// Generate an index between two existing indices
@@ -70,22 +66,21 @@ enum FractionalIndex {
     ///   - after: The index that should sort after the new one (nil for end)
     /// - Returns: A new index that sorts between before and after
     static func between(_ before: String?, _ after: String?) -> String {
+        // Local constants for background thread safety
+//        let chars: [Character] = Array("abcdefghijklmnopqrstuvwxyz")
+//        let base = 26
+
         let a = before ?? ""
-        let b = after ?? String(chars.last!) + String(chars.last!)  // "zz" as max
+        let b = after ?? "zz"  // max
 
-        return midpoint(a, b)
-    }
-
-    /// Calculate lexicographic midpoint between two strings
-    private static func midpoint(_ a: String, _ b: String) -> String {
-        // Pad strings to same length for comparison
+        // Calculate lexicographic midpoint
         let maxLen = max(a.count, b.count, 1)
-        let paddedA = a.padding(toLength: maxLen, withPad: String(chars.first!), startingAt: 0)
-        let paddedB = b.padding(toLength: maxLen, withPad: String(chars.first!), startingAt: 0)
+        let paddedA = a.padding(toLength: maxLen, withPad: "a", startingAt: 0)
+        let paddedB = b.padding(toLength: maxLen, withPad: "a", startingAt: 0)
 
         // Convert to numeric values
-        var aVals = paddedA.compactMap { charToIndex($0) }
-        var bVals = paddedB.compactMap { charToIndex($0) }
+        var aVals = paddedA.compactMap { chars.firstIndex(of: $0) }
+        var bVals = paddedB.compactMap { chars.firstIndex(of: $0) }
 
         // Ensure equal length
         while aVals.count < bVals.count { aVals.append(0) }
@@ -131,19 +126,12 @@ enum FractionalIndex {
 
         // Ensure result is actually between a and b
         if resultStr <= a {
-            // Need more precision - append midpoint character
             resultStr = a + String(chars[base / 2])
         }
         if resultStr >= b {
-            // Need more precision on a
             resultStr = a + String(chars[base / 2])
         }
 
         return resultStr.isEmpty ? String(chars[base / 2]) : resultStr
-    }
-
-    /// Convert character to index in our character set
-    private static func charToIndex(_ char: Character) -> Int? {
-        chars.firstIndex(of: char)
     }
 }
