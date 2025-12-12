@@ -12,7 +12,6 @@ import GRDB
 
 /// Inspector panel showing detailed track information
 struct TrackInspectorView: View {
-    @Environment(AppState.self) private var appState
     let track: LiveSetTrack
     let liveSetPath: String
     let projectPath: String?
@@ -228,8 +227,8 @@ struct TrackInspectorView: View {
     // MARK: - Helpers
 
     private func navigateToSubproject(path: String) {
-        // Push onto detail navigation stack for automatic back button
-        appState.pushDetail(.liveSetByPath(path: path))
+        // TODO: Implement navigation to subproject
+        print("Navigate to subproject: \(path)")
     }
 
     private func iconForTrackType(_ type: TrackType) -> String {
@@ -342,7 +341,6 @@ struct RoutingRow: View {
 
 /// Inspector panel showing detailed LiveSet information
 struct LiveSetInspectorView: View {
-    @Environment(AppState.self) private var appState
     let liveSet: LiveSet
     @State private var editableComment: String = ""
     @State private var isEditingComment: Bool = false
@@ -610,29 +608,6 @@ struct LiveSetInspectorView: View {
                 PropertyRow(label: "Extracted", value: formatDate(extractedAt), icon: "calendar")
             }
 
-            Button {
-                navigateToSource()
-            } label: {
-                Label("Go to Source", systemImage: "arrow.uturn.backward.circle")
-            }
-            .buttonStyle(.borderedProminent)
-        }
-    }
-
-    private func navigateToSource() {
-        guard let projectPath = liveSet.projectPath,
-              let sourceName = liveSet.sourceLiveSetName,
-              let projectDb = ProjectManager.shared.database(forProjectPath: projectPath) else { return }
-
-        // Find source LiveSet by name
-        do {
-            let mainSets = try projectDb.fetchMainLiveSets()
-            guard let source = mainSets.first(where: { $0.name == sourceName }) else { return }
-
-            // Select the source LiveSet (this clears detail navigation automatically)
-            appState.selectedLiveSet = source
-        } catch {
-            print("Error navigating to source: \(error)")
         }
     }
 
@@ -698,12 +673,10 @@ struct LiveSetInspectorView: View {
         liveSetPath: "/test/path.als",
         projectPath: "/test"
     )
-    .environment(AppState())
 }
 
 #Preview("LiveSet Inspector") {
     LiveSetInspectorView(
         liveSet: LiveSet(path: "/test/path.als", category: .main)
     )
-    .environment(AppState())
 }

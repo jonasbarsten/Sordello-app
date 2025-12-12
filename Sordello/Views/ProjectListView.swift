@@ -6,7 +6,7 @@
 import SwiftUI
 
 struct ProjectListView: View {
-    @Binding var selection: String?
+    @Binding var selection: Project?
 
     var body: some View {
         List(selection: $selection) {
@@ -17,7 +17,7 @@ struct ProjectListView: View {
             } else {
                 ForEach(ProjectManager.shared.getOpenProjects(), id: \.path) { project in
                     ProjectRow(project: project)
-                        .tag(project.path)
+                        .tag(project)
                 }
             }
         }

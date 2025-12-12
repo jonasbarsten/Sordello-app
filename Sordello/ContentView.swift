@@ -9,26 +9,27 @@ import SwiftUI
 import GRDBQuery
 
 struct ContentView: View {
-    @State private var selectedProjectPath: String?
+    @State private var selectedProject: Project?
     @State private var selectedLiveSet: LiveSet?
+    @State private var isInspectorVisible = false
 
     var body: some View {
         NavigationSplitView {
-            ProjectListView(selection: $selectedProjectPath)
+            ProjectListView(selection: $selectedProject)
         } content: {
-            if let projectPath = selectedProjectPath,
+            if let projectPath = selectedProject?.path,
                ProjectManager.shared.openProjectPaths.contains(projectPath),
                let db = ProjectManager.shared.database(forProjectPath: projectPath)?.dbQueue {
                 LiveSetListView(projectPath: projectPath, selection: $selectedLiveSet)
                     .databaseContext(.readOnly { db })
-            } else if selectedProjectPath != nil {
+            } else if selectedProject?.path != nil {
                 ProgressView("Loading...")
             } else {
                 Text("Select a project")
                     .foregroundColor(.secondary)
             }
         } detail: {
-            if let projectPath = selectedProjectPath,
+            if let projectPath = selectedProject?.path,
                let db = ProjectManager.shared.database(forProjectPath: projectPath)?.dbQueue {
                 NavigationStack {
                     if let liveSet = selectedLiveSet {
@@ -44,6 +45,15 @@ struct ContentView: View {
                     .foregroundColor(.secondary)
             }
         }
+        .inspector(isPresented: $isInspectorVisible) {
+            if let liveSet = selectedLiveSet {
+                LiveSetInspectorView(liveSet: liveSet)
+            } else {
+                Text("Select a Live Set")
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {
@@ -53,16 +63,26 @@ struct ContentView: View {
                 }
                 .help("Open Project...")
             }
-        }
-        .frame(minWidth: 900, minHeight: 500)
-        .onChange(of: ProjectManager.shared.openProjectPaths) { oldPaths, newPaths in
-            if let newProject = newPaths.first(where: { !oldPaths.contains($0) }) {
-                selectedProjectPath = newProject
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    isInspectorVisible.toggle()
+                } label: {
+                    Image(systemName: "sidebar.trailing")
+                }
+                .help("Toggle Inspector")
             }
         }
-        .onChange(of: selectedProjectPath) { _, _ in
+        .frame(minWidth: 900, minHeight: 500)
+        // Select a new project when it is loaded
+        .onChange(of: ProjectManager.shared.openProjectPaths) { oldPaths, newPaths in
+            if let newProjectPath = newPaths.first(where: { !oldPaths.contains($0) }) {
+                selectedProject = ProjectManager.shared.getProject(byPath: newProjectPath)
+            }
+        }
+        .onChange(of: selectedProject) { _, _ in
             selectedLiveSet = nil
         }
+        .navigationTitle(selectedProject?.name ?? "Sordello")
     }
 }
 

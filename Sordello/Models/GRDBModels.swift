@@ -28,7 +28,7 @@ enum SortOrder: String, Codable {
 // MARK: - GRDB Models
 
 /// Represents an Ableton Live Project folder
-struct Project: Codable, Identifiable, FetchableRecord, PersistableRecord, Sendable {
+struct Project: Codable, Identifiable, FetchableRecord, PersistableRecord, Sendable, Hashable {
     static let databaseTableName = "projects"
 
     /// Primary key - folder path

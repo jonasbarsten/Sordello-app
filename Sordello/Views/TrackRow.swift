@@ -9,7 +9,6 @@ import GRDB
 import GRDBQuery
 
 struct TrackRow: View {
-    @Environment(AppState.self) private var appState
     var track: LiveSetTrack
     let liveSetPath: String
     let projectPath: String?
@@ -39,10 +38,6 @@ struct TrackRow: View {
             sourceLiveSetName: liveSetName,
             sourceTrackId: track.trackId
         ))
-    }
-
-    private var isSelected: Bool {
-        appState.selectedTrack?.trackId == track.trackId
     }
 
     var body: some View {
@@ -157,19 +152,12 @@ struct TrackRow: View {
             }
             .padding(.vertical, 6)
             .padding(.horizontal, 8)
-            .background(
-                isSelected
-                    ? Color.accentColor.opacity(0.2)
-                    : (track.isGroup ? Color(nsColor: .controlBackgroundColor).opacity(0.5) : Color.clear)
-            )
+            .background(track.isGroup ? Color(nsColor: .controlBackgroundColor).opacity(0.5) : Color.clear)
             .cornerRadius(4)
             .contentShape(Rectangle())
             .onTapGesture {
-                if isSelected && track.isGroup {
-                    // Second click on selected group toggles expand/collapse
+                if track.isGroup {
                     isExpanded.toggle()
-                } else {
-                    appState.selectedTrack = track
                 }
             }
             .contextMenu {
@@ -215,8 +203,8 @@ struct TrackRow: View {
     }
 
     private func navigateToVersion(path: String) {
-        // Push onto detail navigation stack for automatic back button
-        appState.pushDetail(.liveSetByPath(path: path))
+        // TODO: Implement navigation to subproject
+        print("Navigate to: \(path)")
     }
 
     private func commitNameChange() {
@@ -274,7 +262,6 @@ struct TrackRow: View {
 // MARK: - Track Versions Popover
 
 struct TrackVersionsPopover: View {
-    @Environment(AppState.self) private var appState
     let versions: [LiveSet]
     let trackName: String
     let projectPath: String
@@ -293,7 +280,7 @@ struct TrackVersionsPopover: View {
                     LazyVStack(alignment: .leading, spacing: 4) {
                         ForEach(versions, id: \.path) { version in
                             NavigationLink(destination: ProjectFileDetailView(liveSet: version)) {
-                                TrackVersionRow(version: version, projectPath: projectPath)
+                                TrackVersionRow(version: version)
                             }
                         }
                     }
@@ -307,9 +294,7 @@ struct TrackVersionsPopover: View {
 }
 
 struct TrackVersionRow: View {
-    @Environment(AppState.self) private var appState
     let version: LiveSet
-    let projectPath: String
 
     private var formattedDate: String {
         guard let date = version.extractedAt else { return "Unknown date" }
@@ -335,10 +320,6 @@ struct TrackVersionRow: View {
                 .foregroundColor(.secondary)
                 .font(.caption)
         }
-//        .padding(.vertical, 6)
-//        .padding(.horizontal, 8)
-//        .background(Color(nsColor: .controlBackgroundColor))
-//        .cornerRadius(4)
     }
 }
 
@@ -349,7 +330,6 @@ struct TrackVersionRow: View {
         projectPath: "/test",
         depth: 0
     )
-    .environment(AppState())
 }
 
 #Preview("MIDI Track") {
@@ -359,7 +339,6 @@ struct TrackVersionRow: View {
         projectPath: "/test",
         depth: 0
     )
-    .environment(AppState())
 }
 
 #Preview("Group Track") {
@@ -369,7 +348,6 @@ struct TrackVersionRow: View {
         projectPath: "/test",
         depth: 0
     )
-    .environment(AppState())
 }
 
 #Preview("Nested Track") {
@@ -379,22 +357,18 @@ struct TrackVersionRow: View {
         projectPath: "/test",
         depth: 1
     )
-    .environment(AppState())
 }
 
 #Preview("Track version row") {
     TrackVersionRow(
-        version: LiveSet(path: "/test/Balbal.als", category: .version),
-        projectPath: "/test",
+        version: LiveSet(path: "/test/Balbal.als", category: .version)
     )
-    .environment(AppState())
 }
 
 #Preview("Track version popover") {
     TrackVersionsPopover(
-        versions: [LiveSet(path: "/test/Balbal.als", category: .version),LiveSet(path: "/test/bolbol.als", category: .version),LiveSet(path: "/test/belbel.als", category: .version)],
+        versions: [LiveSet(path: "/test/Balbal.als", category: .version), LiveSet(path: "/test/bolbol.als", category: .version), LiveSet(path: "/test/belbel.als", category: .version)],
         trackName: "Jonas er kul",
-        projectPath: "/test",
+        projectPath: "/test"
     )
-    .environment(AppState())
 }

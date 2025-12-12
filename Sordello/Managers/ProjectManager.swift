@@ -85,6 +85,12 @@ final class ProjectManager {
         return projects.sorted { $0.lastUpdated > $1.lastUpdated }
     }
 
+    /// Get a project by its path
+    func getProject(byPath path: String) -> Project? {
+        guard let db = projectDatabases[path] else { return nil }
+        return try? db.fetchProject()
+    }
+
     private init() {}
 
     /// Open a project folder using NSOpenPanel
