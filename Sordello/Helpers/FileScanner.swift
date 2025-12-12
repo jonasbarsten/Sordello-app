@@ -73,13 +73,13 @@ struct FileScanner {
                       isDir.boolValue,
                       itemUrl.lastPathComponent != "db" else { continue }
 
-                // Check for versions subdirectory
-                let versionsUrl = itemUrl.appendingPathComponent("versions")
-                guard let versionFiles = try? fileManager.contentsOfDirectory(at: versionsUrl, includingPropertiesForKeys: nil) else { continue }
-
                 // Find the parent LiveSet by matching the folder name
                 let parentName = itemUrl.lastPathComponent
                 guard let parentLiveSet = mainLiveSetPaths[parentName] else { continue }
+
+                // Check for versions subdirectory (optional - may not exist yet)
+                let versionsUrl = itemUrl.appendingPathComponent("versions")
+                let versionFiles = (try? fileManager.contentsOfDirectory(at: versionsUrl, includingPropertiesForKeys: nil)) ?? []
 
                 for versionUrl in versionFiles where versionUrl.pathExtension.lowercased() == "als" {
                     var liveSet = LiveSet(path: versionUrl.path, category: .version)
@@ -106,7 +106,7 @@ struct FileScanner {
                                 liveSet.projectPath = project.path
                                 liveSet.parentLiveSetPath = parentLiveSet.path
                                 liveSet.sourceLiveSetName = parentName
-                                liveSet.sourceGroupId = trackId
+                                liveSet.sourceTrackId = trackId
                                 liveSet.fileModificationDate = getFileModificationDate(for: trackVersionUrl)
                                 try db.insertLiveSet(liveSet)
                             }
@@ -246,13 +246,13 @@ struct FileScanner {
                       isDir.boolValue,
                       itemUrl.lastPathComponent != "db" else { continue }
 
-                // Check for versions subdirectory
-                let versionsUrl = itemUrl.appendingPathComponent("versions")
-                guard let versionFiles = try? fileManager.contentsOfDirectory(at: versionsUrl, includingPropertiesForKeys: [.contentModificationDateKey]) else { continue }
-
                 // Find the parent LiveSet by matching the folder name
                 let parentName = itemUrl.lastPathComponent
                 let parentLiveSet = mainLiveSetsByName[parentName]
+
+                // Check for versions subdirectory (optional - may not exist yet)
+                let versionsUrl = itemUrl.appendingPathComponent("versions")
+                let versionFiles = (try? fileManager.contentsOfDirectory(at: versionsUrl, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
 
                 for versionUrl in versionFiles where versionUrl.pathExtension.lowercased() == "als" {
                     let filePath = versionUrl.path
@@ -316,7 +316,7 @@ struct FileScanner {
                                     liveSet.projectPath = project.path
                                     liveSet.parentLiveSetPath = parentLiveSet?.path
                                     liveSet.sourceLiveSetName = parentName
-                                    liveSet.sourceGroupId = trackId
+                                    liveSet.sourceTrackId = trackId
                                     liveSet.fileModificationDate = currentModDate
                                     try db.insertLiveSet(liveSet)
                                     newLiveSets.append(liveSet)

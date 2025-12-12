@@ -22,7 +22,7 @@ struct SubprojectsSection: View {
                 Section("Subprojects") {
                     ForEach(subprojects, id: \.path) { subproject in
                         LiveSetRow(liveSet: subproject)
-                            .tag(subproject.path)
+                            .tag(subproject)
                     }
                 }
             }

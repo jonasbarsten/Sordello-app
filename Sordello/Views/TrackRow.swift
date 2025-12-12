@@ -6,25 +6,43 @@
 import SwiftUI
 import AppKit
 import GRDB
+import GRDBQuery
 
 struct TrackRow: View {
+    @Environment(AppState.self) private var appState
     var track: LiveSetTrack
     let liveSetPath: String
+    let projectPath: String?
     let depth: Int
     @State private var isExpanded = false
-    @State private var isExtracting = false
-    @State private var extractionError: String?
-    @State private var showError = false
-    @State private var showOpenPrompt = false
-    @State private var extractedPath: String?
     @State private var isEditingName = false
     @State private var editingText = ""
-    @State private var children: [LiveSetTrack] = []
-    @State private var observationTask: Task<Void, Never>?
+    @State private var showingVersions = false
+    @Query<ChildTracksRequest> var children: [LiveSetTrack]
+    @Query<TrackVersionsRequest> var trackVersions: [LiveSet]
     @FocusState private var isNameFieldFocused: Bool
 
+    private var liveSetName: String {
+        URL(fileURLWithPath: liveSetPath).deletingPathExtension().lastPathComponent
+    }
+
+    init(track: LiveSetTrack, liveSetPath: String, projectPath: String?, depth: Int) {
+        self.track = track
+        self.liveSetPath = liveSetPath
+        self.projectPath = projectPath
+        self.depth = depth
+        _children = Query(constant: ChildTracksRequest(liveSetPath: liveSetPath, parentGroupId: track.trackId))
+
+        let liveSetName = URL(fileURLWithPath: liveSetPath).deletingPathExtension().lastPathComponent
+        _trackVersions = Query(constant: TrackVersionsRequest(
+            projectPath: projectPath ?? "",
+            sourceLiveSetName: liveSetName,
+            sourceTrackId: track.trackId
+        ))
+    }
+
     private var isSelected: Bool {
-        UIState.shared.selectedTrack?.trackId == track.trackId
+        appState.selectedTrack?.trackId == track.trackId
     }
 
     var body: some View {
@@ -44,9 +62,6 @@ struct TrackRow: View {
                         .frame(width: 16)
                         .onTapGesture {
                             isExpanded.toggle()
-                            if isExpanded && children.isEmpty {
-                                loadChildren()
-                            }
                         }
                 } else {
                     Rectangle()
@@ -89,18 +104,32 @@ struct TrackRow: View {
                         .help("Name changed from '\(track.originalName)'")
                 }
 
-                Spacer()
-
-                // Extraction indicator
-                if isExtracting {
-                    ProgressView()
-                        .controlSize(.small)
+                // Version indicator
+                if !trackVersions.isEmpty {
+                    Button {
+                        showingVersions.toggle()
+                    } label: {
+                        HStack(spacing: 2) {
+                            Image(systemName: "clock.arrow.circlepath")
+                            Text("\(trackVersions.count)")
+                                .font(.caption2)
+                        }
+                        .foregroundColor(.purple)
+                        .font(.caption)
+                    }
+                    .buttonStyle(.plain)
+                    .help("\(trackVersions.count) version(s)")
+                    .popover(isPresented: $showingVersions) {
+                        TrackVersionsPopover(versions: trackVersions, trackName: track.name, projectPath: projectPath ?? "")
+                    }
                 }
+
+                Spacer()
 
                 // Subproject indicator
                 if let subprojectPath = track.subprojectPath {
                     Button {
-                        navigateToSubproject(path: subprojectPath)
+                        navigateToVersion(path: subprojectPath)
                     } label: {
                         HStack(spacing: 4) {
                             if track.bounceReady {
@@ -139,11 +168,8 @@ struct TrackRow: View {
                 if isSelected && track.isGroup {
                     // Second click on selected group toggles expand/collapse
                     isExpanded.toggle()
-                    if isExpanded && children.isEmpty {
-                        loadChildren()
-                    }
                 } else {
-                    UIState.shared.selectedTrack = track
+                    appState.selectedTrack = track
                 }
             }
             .contextMenu {
@@ -160,106 +186,44 @@ struct TrackRow: View {
                 }
 
                 Divider()
-                Button("Create Version") {
-                    ProjectManager.shared.createLiveSetTrackVersion(
-                        liveSetPath: liveSetPath,
-                        trackId: track.trackId,
-                        trackName: track.name
-                    )
+
+                Button("Create Version as subproject") {
+                    if let projectPath = projectPath {
+                        ProjectManager.shared.createLiveSetTrackVersion(
+                            liveSetPath: liveSetPath,
+                            trackId: track.trackId,
+                            trackName: track.name,
+                            projectPath: projectPath
+                        )
+                    }
                 }
 
-                if track.isGroup {
-                    Button("Extract as Subproject") {
-                        extractAsSubproject()
-                    }
-                    .disabled(isExtracting)
-                }
-            }
-            .alert("Extraction Error", isPresented: $showError) {
-                Button("OK", role: .cancel) { }
-            } message: {
-                Text(extractionError ?? "Unknown error")
-            }
-            .alert("Subproject Created", isPresented: $showOpenPrompt) {
-                Button("Open in Ableton") {
-                    if let path = extractedPath {
-                        openInAbleton(path: path)
+                if !trackVersions.isEmpty {
+                    Button("Show Versions (\(trackVersions.count))") {
+                        showingVersions = true
                     }
                 }
-                Button("Later", role: .cancel) { }
-            } message: {
-                Text("Would you like to open the subproject in Ableton Live?")
             }
 
             // Children (if expanded)
             if track.isGroup && isExpanded {
                 ForEach(children, id: \.trackId) { child in
-                    TrackRow(track: child, liveSetPath: liveSetPath, depth: depth + 1)
-                }
-            }
-        }
-        .onDisappear {
-            observationTask?.cancel()
-        }
-    }
-
-    private func navigateToSubproject(path: String) {
-        UIState.shared.selectedLiveSetPath = path
-        UIState.shared.selectedTrack = nil
-    }
-
-    private func extractAsSubproject() {
-        let projectPath = URL(fileURLWithPath: liveSetPath).deletingLastPathComponent().path
-
-        // Get project name
-        let projectName = URL(fileURLWithPath: projectPath).lastPathComponent.replacingOccurrences(of: " Project", with: "")
-
-        // Get LiveSet name
-        let liveSetName = URL(fileURLWithPath: liveSetPath).deletingPathExtension().lastPathComponent
-
-        let safeName = track.name.replacingOccurrences(of: "/", with: "-")
-        let timestamp = ISO8601DateFormatter().string(from: Date())
-            .replacingOccurrences(of: ":", with: "-")
-        let fileName = ".subproject-\(projectName)-\(safeName)-\(timestamp).als"
-        let outputPath = URL(fileURLWithPath: projectPath).appendingPathComponent(fileName).path
-
-        isExtracting = true
-
-        ProjectManager.shared.extractSubproject(
-            from: liveSetPath,
-            groupId: track.trackId,
-            groupName: track.name,
-            sourceLiveSetName: liveSetName,
-            to: outputPath,
-            projectPath: projectPath
-        ) { result in
-            DispatchQueue.main.async {
-                isExtracting = false
-
-                if let path = result {
-                    print("Extracted subproject to: \(path)")
-                    extractedPath = path
-                    showOpenPrompt = true
-                    ProjectManager.shared.rescanProject(projectPath: projectPath)
-                } else {
-                    extractionError = "Failed to extract subproject"
-                    showError = true
+                    TrackRow(track: child, liveSetPath: liveSetPath, projectPath: projectPath, depth: depth + 1)
                 }
             }
         }
     }
 
-    private func openInAbleton(path: String) {
-        let url = URL(fileURLWithPath: path)
-        NSWorkspace.shared.open(url)
+    private func navigateToVersion(path: String) {
+        // Push onto detail navigation stack for automatic back button
+        appState.pushDetail(.liveSetByPath(path: path))
     }
 
     private func commitNameChange() {
         isEditingName = false
         guard editingText != track.name else { return }
-
-        let projectPath = URL(fileURLWithPath: liveSetPath).deletingLastPathComponent().path
-        guard let projectDb = ProjectManager.shared.database(forProjectPath: projectPath) else { return }
+        guard let projectPath = projectPath,
+              let projectDb = ProjectManager.shared.database(forProjectPath: projectPath) else { return }
 
         var updatedTrack = track
         updatedTrack.name = editingText
@@ -274,8 +238,8 @@ struct TrackRow: View {
     }
 
     private func undoNameChange() {
-        let projectPath = URL(fileURLWithPath: liveSetPath).deletingLastPathComponent().path
-        guard let projectDb = ProjectManager.shared.database(forProjectPath: projectPath) else { return }
+        guard let projectPath = projectPath,
+              let projectDb = ProjectManager.shared.database(forProjectPath: projectPath) else { return }
 
         var updatedTrack = track
         updatedTrack.name = track.originalName
@@ -285,24 +249,6 @@ struct TrackRow: View {
             try projectDb.updateTrack(updatedTrack)
         } catch {
             print("Failed to undo name change: \(error)")
-        }
-    }
-
-    private func loadChildren() {
-        let projectPath = URL(fileURLWithPath: liveSetPath).deletingLastPathComponent().path
-        guard let projectDb = ProjectManager.shared.database(forProjectPath: projectPath),
-              let db = projectDb.dbQueue else { return }
-
-        observationTask?.cancel()
-        observationTask = Task {
-            let observation = projectDb.observeChildTracks(forLiveSetPath: liveSetPath, parentGroupId: track.trackId)
-            do {
-                for try await fetched in observation.values(in: db) {
-                    children = fetched
-                }
-            } catch {
-                // Observation cancelled
-            }
         }
     }
 
@@ -325,34 +271,130 @@ struct TrackRow: View {
     }
 }
 
+// MARK: - Track Versions Popover
+
+struct TrackVersionsPopover: View {
+    @Environment(AppState.self) private var appState
+    let versions: [LiveSet]
+    let trackName: String
+    let projectPath: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Versions of \(trackName)")
+                .font(.headline)
+                .padding(.bottom, 4)
+
+            if versions.isEmpty {
+                Text("No versions found")
+                    .foregroundColor(.secondary)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 4) {
+                        ForEach(versions, id: \.path) { version in
+                            NavigationLink(destination: ProjectFileDetailView(liveSet: version)) {
+                                TrackVersionRow(version: version, projectPath: projectPath)
+                            }
+                        }
+                    }
+                }
+                .frame(maxHeight: 300)
+            }
+        }
+        .padding()
+        .frame(minWidth: 280)
+    }
+}
+
+struct TrackVersionRow: View {
+    @Environment(AppState.self) private var appState
+    let version: LiveSet
+    let projectPath: String
+
+    private var formattedDate: String {
+        guard let date = version.extractedAt else { return "Unknown date" }
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
+    }
+
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(version.name)
+                    .fontWeight(.medium)
+                Text(formattedDate)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Spacer()
+
+            Image(systemName: "chevron.right")
+                .foregroundColor(.secondary)
+                .font(.caption)
+        }
+//        .padding(.vertical, 6)
+//        .padding(.horizontal, 8)
+//        .background(Color(nsColor: .controlBackgroundColor))
+//        .cornerRadius(4)
+    }
+}
+
 #Preview("Audio Track") {
     TrackRow(
         track: LiveSetTrack(trackId: 1, name: "Drums", type: .audio, parentGroupId: nil),
         liveSetPath: "/test/My Song.als",
+        projectPath: "/test",
         depth: 0
     )
+    .environment(AppState())
 }
 
 #Preview("MIDI Track") {
     TrackRow(
         track: LiveSetTrack(trackId: 2, name: "Synth Lead", type: .midi, parentGroupId: nil),
         liveSetPath: "/test/My Song.als",
+        projectPath: "/test",
         depth: 0
     )
+    .environment(AppState())
 }
 
 #Preview("Group Track") {
     TrackRow(
         track: LiveSetTrack(trackId: 3, name: "Drums Group", type: .group, parentGroupId: nil),
         liveSetPath: "/test/My Song.als",
+        projectPath: "/test",
         depth: 0
     )
+    .environment(AppState())
 }
 
 #Preview("Nested Track") {
     TrackRow(
         track: LiveSetTrack(trackId: 4, name: "Kick", type: .audio, parentGroupId: 3),
         liveSetPath: "/test/My Song.als",
+        projectPath: "/test",
         depth: 1
     )
+    .environment(AppState())
+}
+
+#Preview("Track version row") {
+    TrackVersionRow(
+        version: LiveSet(path: "/test/Balbal.als", category: .version),
+        projectPath: "/test",
+    )
+    .environment(AppState())
+}
+
+#Preview("Track version popover") {
+    TrackVersionsPopover(
+        versions: [LiveSet(path: "/test/Balbal.als", category: .version),LiveSet(path: "/test/bolbol.als", category: .version),LiveSet(path: "/test/belbel.als", category: .version)],
+        trackName: "Jonas er kul",
+        projectPath: "/test",
+    )
+    .environment(AppState())
 }

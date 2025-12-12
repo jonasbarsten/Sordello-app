@@ -28,7 +28,6 @@ struct OriginalLiveSetRow: View {
                     .controlSize(.mini)
             }
         }
-        .contentShape(Rectangle())
         .contextMenu {
             Button("Open in Ableton Live") {
                 NSWorkspace.shared.open(URL(fileURLWithPath: liveSet.path))

@@ -75,7 +75,8 @@ nonisolated struct AlsHandler: FileHandler {
     static func parseAllInBackground(
         paths: [String],
         bookmarkData: Data,
-        db: ProjectDatabase
+        db: ProjectDatabase,
+        projectPath: String
     ) {
         // Resolve bookmark for security-scoped access
         var isStale = false
@@ -95,14 +96,20 @@ nonisolated struct AlsHandler: FileHandler {
         }
 
         Task {
-            await parseWithLimitedConcurrency(paths: paths, db: db)
+            await MainActor.run {
+                ProjectManager.shared.startParsingProgress(for: projectPath, total: paths.count)
+            }
+            await parseWithLimitedConcurrency(paths: paths, db: db, projectPath: projectPath)
+            await MainActor.run {
+                ProjectManager.shared.clearParsingProgress(for: projectPath)
+            }
             folderUrl.stopAccessingSecurityScopedResource()
         }
     }
 
     /// Parse paths with limited concurrency using TaskGroup
     /// Processes in chunks to limit memory and allow UI updates between chunks
-    private static func parseWithLimitedConcurrency(paths: [String], db: ProjectDatabase) async {
+    private static func parseWithLimitedConcurrency(paths: [String], db: ProjectDatabase, projectPath: String) async {
         var totalCompleted = 0
         let totalCount = paths.count
 
@@ -119,6 +126,11 @@ nonisolated struct AlsHandler: FileHandler {
                 // Process results as they complete
                 for await result in group {
                     totalCompleted += 1
+
+                    // Update progress on main thread
+                    await MainActor.run {
+                        ProjectManager.shared.updateParsingProgress(for: projectPath, completed: totalCompleted)
+                    }
 
                     guard result.success else {
                         print("[\(totalCompleted)/\(totalCount)] Failed: \(URL(fileURLWithPath: result.path).lastPathComponent)")

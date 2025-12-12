@@ -77,8 +77,8 @@ final class AppDatabase {
                 t.column("backupTimestamp", .datetime)
                 t.column("parentLiveSetPath", .text)
                 t.column("sourceLiveSetName", .text)
-                t.column("sourceGroupId", .integer)
-                t.column("sourceGroupName", .text)
+                t.column("sourceTrackId", .integer)
+                t.column("sourceTrackName", .text)
                 t.column("extractedAt", .datetime)
             }
 

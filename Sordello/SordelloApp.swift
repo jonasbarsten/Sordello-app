@@ -9,17 +9,14 @@ import SwiftUI
 
 @main
 struct SordelloApp: App {
-
-    init() {
-        // Per-project databases are created when projects are opened
-        // No global app database initialization needed
-    }
+    @State private var appState = AppState()
 
     @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .environment(appState)
         }
         .commands {
             CommandGroup(replacing: .newItem) {

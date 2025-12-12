@@ -11,27 +11,24 @@ struct LiveSetMainRow: View {
     let versionCount: Int
     let isExpanded: Bool
     var onToggleExpand: (() -> Void)?
-    var onSelect: (() -> Void)?
     var latestVersionPath: String?
 
-    private var isSelected: Bool {
-        UIState.shared.selectedLiveSetPath == liveSet.path
-    }
-
     var body: some View {
-        HStack {
+        HStack(spacing: 4) {
             // Expand/collapse chevron (only if has versions)
             if versionCount > 0 {
-                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                    .foregroundColor(.secondary)
-                    .frame(width: 12)
-                    .onTapGesture {
-                        onToggleExpand?()
-                    }
+                Button {
+                    onToggleExpand?()
+                } label: {
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .foregroundColor(.secondary)
+                        .frame(width: 16, height: 16)
+                }
+                .buttonStyle(.plain)
             } else {
                 Rectangle()
                     .fill(Color.clear)
-                    .frame(width: 12)
+                    .frame(width: 16)
             }
 
             Image(systemName: "doc.fill")
@@ -52,15 +49,6 @@ struct LiveSetMainRow: View {
             if !liveSet.isParsed {
                 ProgressView()
                     .controlSize(.small)
-            }
-        }
-        .contentShape(Rectangle())
-        .onTapGesture {
-            if isSelected && versionCount > 0 {
-                // Second click on selected liveset with versions toggles expand/collapse
-                onToggleExpand?()
-            } else {
-                onSelect?()
             }
         }
         .contextMenu {
@@ -93,17 +81,21 @@ struct LiveSetMainRow: View {
 }
 
 #Preview("With Versions") {
-    LiveSetMainRow(
-        liveSet: LiveSet(path: "/test/My Song.als", category: .main),
-        versionCount: 3,
-        isExpanded: false
-    )
+    List {
+        LiveSetMainRow(
+            liveSet: LiveSet(path: "/test/My Song.als", category: .main),
+            versionCount: 3,
+            isExpanded: false
+        )
+    }
 }
 
 #Preview("No Versions") {
-    LiveSetMainRow(
-        liveSet: LiveSet(path: "/test/My Song.als", category: .main),
-        versionCount: 0,
-        isExpanded: false
-    )
+    List {
+        LiveSetMainRow(
+            liveSet: LiveSet(path: "/test/My Song.als", category: .main),
+            versionCount: 0,
+            isExpanded: false
+        )
+    }
 }

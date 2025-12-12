@@ -6,7 +6,8 @@
 import SwiftUI
 import AppKit
 
-struct LiveSetHeader: View {
+struct ProjectFileHeader: View {
+    @Environment(AppState.self) private var appState
     let liveSet: LiveSet
     @State private var groupCount: Int = 0
     @State private var modifiedCount: Int = 0
@@ -111,7 +112,7 @@ struct LiveSetHeader: View {
                         }
                     } else if liveSet.hasMetadata {
                         // Fallback to stored metadata
-                        Text(liveSet.sourceGroupName ?? liveSet.name)
+                        Text(liveSet.sourceTrackName ?? liveSet.name)
                             .font(.title)
                             .fontWeight(.bold)
 
@@ -282,7 +283,7 @@ struct LiveSetHeader: View {
             ProjectManager.shared.parseLiveSet(liveSet)
 
             // Navigate to the new version in the sidebar
-            UIState.shared.selectedLiveSetPath = outputPath
+            appState.selectedLiveSetPath = outputPath
 
             showOpenPrompt = true
         } else {
@@ -293,9 +294,11 @@ struct LiveSetHeader: View {
 }
 
 #Preview("Main LiveSet") {
-    LiveSetHeader(liveSet: LiveSet(path: "/test/My Song.als", category: .main))
+    ProjectFileHeader(liveSet: LiveSet(path: "/test/My Song.als", category: .main))
+        .environment(AppState())
 }
 
 #Preview("Subproject") {
-    LiveSetHeader(liveSet: LiveSet(path: "/test/.subproject-My Song-Drums-2025-12-09T14-30-00.als", category: .liveSetTrackVersion))
+    ProjectFileHeader(liveSet: LiveSet(path: "/test/.subproject-My Song-Drums-2025-12-09T14-30-00.als", category: .liveSetTrackVersion))
+        .environment(AppState())
 }

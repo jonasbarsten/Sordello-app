@@ -151,6 +151,14 @@ nonisolated class ProjectDatabase {
             }
         }
 
+        // v3: Rename sourceGroupId/Name to sourceTrackId/Name
+        migrator.registerMigration("v3") { db in
+            try db.alter(table: "live_sets") { t in
+                t.rename(column: "sourceGroupId", to: "sourceTrackId")
+                t.rename(column: "sourceGroupName", to: "sourceTrackName")
+            }
+        }
+
         try migrator.migrate(db)
     }
 

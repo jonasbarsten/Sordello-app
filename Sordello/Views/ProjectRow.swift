@@ -10,6 +10,10 @@ struct ProjectRow: View {
     @State private var mainCount: Int = 0
     @State private var subprojectCount: Int = 0
 
+    private var parsingProgress: ParsingProgress? {
+        ProjectManager.shared.parsingProgress[project.path]
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
@@ -18,9 +22,20 @@ struct ProjectRow: View {
                 Text(project.name)
                     .fontWeight(.medium)
             }
-            Text("\(mainCount) set(s), \(subprojectCount) subproject(s)")
-                .font(.caption)
-                .foregroundColor(.secondary)
+
+            if let progress = parsingProgress {
+                VStack(alignment: .leading, spacing: 2) {
+                    ProgressView(value: progress.fraction)
+                        .progressViewStyle(.linear)
+                    Text("Parsing \(progress.completed)/\(progress.total)")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            } else {
+                Text("\(mainCount) set(s), \(subprojectCount) subproject(s)")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
         }
         .padding(.vertical, 4)
         .onAppear {

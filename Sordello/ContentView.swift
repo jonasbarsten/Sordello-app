@@ -9,55 +9,40 @@ import SwiftUI
 import GRDBQuery
 
 struct ContentView: View {
-    
-    // Updated via .onChangeOf
-    @State private var inspectorIsVisible = UIState.shared.isInspectorVisible
+    @State private var selectedProjectPath: String?
+    @State private var selectedLiveSet: LiveSet?
 
     var body: some View {
         NavigationSplitView {
-            ProjectListView()
+            ProjectListView(selection: $selectedProjectPath)
         } content: {
-            if let selectedPath = UIState.shared.selectedProjectPath,
-               ProjectManager.shared.openProjectPaths.contains(selectedPath),
-               let db = ProjectManager.shared.database(forProjectPath: selectedPath)?.dbQueue {
-                LiveSetListView(projectPath: selectedPath)
+            if let projectPath = selectedProjectPath,
+               ProjectManager.shared.openProjectPaths.contains(projectPath),
+               let db = ProjectManager.shared.database(forProjectPath: projectPath)?.dbQueue {
+                LiveSetListView(projectPath: projectPath, selection: $selectedLiveSet)
                     .databaseContext(.readOnly { db })
-            } else if UIState.shared.selectedProjectPath != nil {
-                // Project selected but database not ready yet
+            } else if selectedProjectPath != nil {
                 ProgressView("Loading...")
             } else {
                 Text("Select a project")
                     .foregroundColor(.secondary)
             }
         } detail: {
-            if let selectedPath = UIState.shared.selectedLiveSetPath,
-               let projectPath = UIState.shared.selectedProjectPath,
+            if let projectPath = selectedProjectPath,
                let db = ProjectManager.shared.database(forProjectPath: projectPath)?.dbQueue {
-                LiveSetDetailWrapper(liveSetPath: selectedPath)
-                    .databaseContext(.readOnly { db })
-            } else if UIState.shared.selectedLiveSetPath != nil {
-                ProgressView("Loading...")
-            } else {
-                VStack(spacing: 16) {
-                    Image(systemName: "music.note.list")
-                        .font(.system(size: 64))
-                        .foregroundColor(.secondary)
-                    Text("No project selected")
-                        .font(.title2)
-                        .foregroundColor(.secondary)
-                    Text("Open a project to get started")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    Button("Open Project...") {
-                        ProjectManager.shared.openProject()
+                NavigationStack {
+                    if let liveSet = selectedLiveSet {
+                        ProjectFileDetailView(liveSet: liveSet)
+                    } else {
+                        Text("Select a Live Set")
+                            .foregroundColor(.secondary)
                     }
-                    .keyboardShortcut("o", modifiers: .command)
                 }
+                .databaseContext(.readOnly { db })
+            } else {
+                Text("Select a project")
+                    .foregroundColor(.secondary)
             }
-        }
-        .inspector(isPresented: $inspectorIsVisible) {
-            InspectorContent()
-                .inspectorColumnWidth(min: 250, ideal: 300, max: 400)
         }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
@@ -68,19 +53,16 @@ struct ContentView: View {
                 }
                 .help("Open Project...")
             }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    UIState.shared.isInspectorVisible.toggle()
-                } label: {
-                    Image(systemName: inspectorIsVisible ? "info.circle.fill" : "info.circle")
-                }
-                .help(inspectorIsVisible ? "Hide Inspector" : "Show Inspector")
+        }
+        .frame(minWidth: 900, minHeight: 500)
+        .onChange(of: ProjectManager.shared.openProjectPaths) { oldPaths, newPaths in
+            if let newProject = newPaths.first(where: { !oldPaths.contains($0) }) {
+                selectedProjectPath = newProject
             }
         }
-        .onChange(of: UIState.shared.isInspectorVisible, { _, newValue in
-            inspectorIsVisible = newValue
-        })
-        .frame(minWidth: 900, minHeight: 500)
+        .onChange(of: selectedProjectPath) { _, _ in
+            selectedLiveSet = nil
+        }
     }
 }
 

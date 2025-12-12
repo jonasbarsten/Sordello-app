@@ -12,8 +12,10 @@ import GRDB
 
 /// Inspector panel showing detailed track information
 struct TrackInspectorView: View {
+    @Environment(AppState.self) private var appState
     let track: LiveSetTrack
     let liveSetPath: String
+    let projectPath: String?
 
     var body: some View {
         ScrollView {
@@ -142,8 +144,8 @@ struct TrackInspectorView: View {
 
     private var childCount: Int {
         let parentId = track.trackId
-        let projectPath = URL(fileURLWithPath: liveSetPath).deletingLastPathComponent().path
-        guard let projectDb = ProjectManager.shared.database(forProjectPath: projectPath) else { return 0 }
+        guard let projectPath = projectPath,
+              let projectDb = ProjectManager.shared.database(forProjectPath: projectPath) else { return 0 }
         do {
             let children = try projectDb.fetchChildTracks(forLiveSetPath: liveSetPath, parentGroupId: parentId)
             return children.count
@@ -154,8 +156,8 @@ struct TrackInspectorView: View {
 
     private func countByType(_ type: TrackType) -> Int {
         let parentId = track.trackId
-        let projectPath = URL(fileURLWithPath: liveSetPath).deletingLastPathComponent().path
-        guard let projectDb = ProjectManager.shared.database(forProjectPath: projectPath) else { return 0 }
+        guard let projectPath = projectPath,
+              let projectDb = ProjectManager.shared.database(forProjectPath: projectPath) else { return 0 }
         do {
             let children = try projectDb.fetchChildTracks(forLiveSetPath: liveSetPath, parentGroupId: parentId)
             return children.filter { $0.type == type }.count
@@ -226,8 +228,8 @@ struct TrackInspectorView: View {
     // MARK: - Helpers
 
     private func navigateToSubproject(path: String) {
-        UIState.shared.selectedLiveSetPath = path
-        UIState.shared.selectedTrack = nil
+        // Push onto detail navigation stack for automatic back button
+        appState.pushDetail(.liveSetByPath(path: path))
     }
 
     private func iconForTrackType(_ type: TrackType) -> String {
@@ -340,6 +342,7 @@ struct RoutingRow: View {
 
 /// Inspector panel showing detailed LiveSet information
 struct LiveSetInspectorView: View {
+    @Environment(AppState.self) private var appState
     let liveSet: LiveSet
     @State private var editableComment: String = ""
     @State private var isEditingComment: Bool = false
@@ -601,8 +604,8 @@ struct LiveSetInspectorView: View {
                 .foregroundColor(.secondary)
 
             PropertyRow(label: "Live Set", value: liveSet.sourceLiveSetName ?? "", icon: "doc.fill")
-            PropertyRow(label: "Group", value: liveSet.sourceGroupName ?? "", icon: "folder.fill")
-            PropertyRow(label: "Group ID", value: "\(liveSet.sourceGroupId ?? 0)", icon: "number")
+            PropertyRow(label: "Track", value: liveSet.sourceTrackName ?? "", icon: "folder.fill")
+            PropertyRow(label: "Track ID", value: "\(liveSet.sourceTrackId ?? 0)", icon: "number")
             if let extractedAt = liveSet.extractedAt {
                 PropertyRow(label: "Extracted", value: formatDate(extractedAt), icon: "calendar")
             }
@@ -626,9 +629,8 @@ struct LiveSetInspectorView: View {
             let mainSets = try projectDb.fetchMainLiveSets()
             guard let source = mainSets.first(where: { $0.name == sourceName }) else { return }
 
-            UIState.shared.selectedLiveSet = source
-            UIState.shared.selectedTrack = nil
-            // TODO: Select the source group track by fetching it from DB
+            // Select the source LiveSet (this clears detail navigation automatically)
+            appState.selectedLiveSet = source
         } catch {
             print("Error navigating to source: \(error)")
         }
@@ -693,12 +695,15 @@ struct LiveSetInspectorView: View {
             type: .audio,
             parentGroupId: nil
         ),
-        liveSetPath: "/test/path.als"
+        liveSetPath: "/test/path.als",
+        projectPath: "/test"
     )
+    .environment(AppState())
 }
 
 #Preview("LiveSet Inspector") {
     LiveSetInspectorView(
         liveSet: LiveSet(path: "/test/path.als", category: .main)
     )
+    .environment(AppState())
 }

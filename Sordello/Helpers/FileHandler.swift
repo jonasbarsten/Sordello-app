@@ -27,7 +27,7 @@ protocol FileHandler {
     static func parseAndSave(_ file: FileType, to db: ProjectDatabase) -> Bool
 
     /// Parse all files in background using security-scoped bookmark
-    static func parseAllInBackground(paths: [String], bookmarkData: Data, db: ProjectDatabase)
+    static func parseAllInBackground(paths: [String], bookmarkData: Data, db: ProjectDatabase, projectPath: String)
 }
 
 // MARK: - File Handlers Dispatcher
@@ -67,21 +67,22 @@ enum FileHandlers {
         paths: [String],
         fileType: String,
         bookmarkData: Data,
-        db: ProjectDatabase
+        db: ProjectDatabase,
+        projectPath: String
     ) {
         switch fileType {
         case "als":
-            AlsHandler.parseAllInBackground(paths: paths, bookmarkData: bookmarkData, db: db)
+            AlsHandler.parseAllInBackground(paths: paths, bookmarkData: bookmarkData, db: db, projectPath: projectPath)
         // Future:
         // case "png", "jpg":
-        //     ImageHandler.parseAllInBackground(paths: paths, bookmarkData: bookmarkData, db: db)
+        //     ImageHandler.parseAllInBackground(paths: paths, bookmarkData: bookmarkData, db: db, projectPath: projectPath)
         default:
             print("FileHandlers: No handler for file type: \(fileType)")
         }
     }
 
     /// Parse all .als files in background (convenience method)
-    static func parseLiveSetsInBackground(paths: [String], bookmarkData: Data, db: ProjectDatabase) {
-        AlsHandler.parseAllInBackground(paths: paths, bookmarkData: bookmarkData, db: db)
+    static func parseLiveSetsInBackground(paths: [String], bookmarkData: Data, db: ProjectDatabase, projectPath: String) {
+        AlsHandler.parseAllInBackground(paths: paths, bookmarkData: bookmarkData, db: db, projectPath: projectPath)
     }
 }

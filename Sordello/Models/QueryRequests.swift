@@ -120,3 +120,21 @@ struct AllTracksRequest: ValueObservationQueryable {
             .fetchAll(db)
     }
 }
+
+struct TrackVersionsRequest: ValueObservationQueryable {
+    let projectPath: String
+    let sourceLiveSetName: String
+    let sourceTrackId: Int
+
+    static var defaultValue: [LiveSet] { [] }
+
+    func fetch(_ db: Database) throws -> [LiveSet] {
+        try LiveSet
+            .filter(Column("projectPath") == projectPath)
+            .filter(Column("category") == FileCategory.liveSetTrackVersion.rawValue)
+            .filter(Column("sourceLiveSetName") == sourceLiveSetName)
+            .filter(Column("sourceTrackId") == sourceTrackId)
+            .order(Column("extractedAt").desc)
+            .fetchAll(db)
+    }
+}

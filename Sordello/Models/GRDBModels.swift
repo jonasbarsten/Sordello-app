@@ -61,7 +61,7 @@ struct Project: Codable, Identifiable, FetchableRecord, PersistableRecord, Senda
 }
 
 /// Represents an individual .als file (Live Set)
-nonisolated struct LiveSet: Codable, Identifiable, FetchableRecord, PersistableRecord, Sendable, ProjectFile {
+nonisolated struct LiveSet: Codable, Identifiable, FetchableRecord, PersistableRecord, Sendable, ProjectFile, Hashable {
     static let databaseTableName = "live_sets"
     static let fileExtension = "als"
 
@@ -91,8 +91,8 @@ nonisolated struct LiveSet: Codable, Identifiable, FetchableRecord, PersistableR
 
     /// Subproject metadata
     var sourceLiveSetName: String?
-    var sourceGroupId: Int?
-    var sourceGroupName: String?
+    var sourceTrackId: Int?
+    var sourceTrackName: String?
     var extractedAt: Date?
 
     /// Whether to auto-create versions when this LiveSet is saved (main LiveSets only)
@@ -105,7 +105,7 @@ nonisolated struct LiveSet: Codable, Identifiable, FetchableRecord, PersistableR
 
     /// Computed: Has subproject metadata
     var hasMetadata: Bool {
-        sourceLiveSetName != nil && sourceGroupId != nil
+        sourceLiveSetName != nil && sourceTrackId != nil
     }
 
     init(path: String, category: FileCategory) {

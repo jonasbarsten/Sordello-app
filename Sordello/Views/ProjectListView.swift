@@ -6,12 +6,10 @@
 import SwiftUI
 
 struct ProjectListView: View {
+    @Binding var selection: String?
 
     var body: some View {
-        List(selection: Binding(
-            get: { UIState.shared.selectedProjectPath },
-            set: { UIState.shared.selectedProjectPath = $0 }
-        )) {
+        List(selection: $selection) {
             if ProjectManager.shared.openProjectPaths.isEmpty {
                 Text("No projects opened")
                     .foregroundColor(.secondary)
@@ -28,5 +26,5 @@ struct ProjectListView: View {
 }
 
 #Preview {
-    ProjectListView()
+    ProjectListView(selection: .constant(nil))
 }

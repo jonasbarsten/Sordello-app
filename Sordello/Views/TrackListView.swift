@@ -32,7 +32,7 @@ struct TrackListView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(rootTracks, id: \.trackId) { track in
-                            TrackRow(track: track, liveSetPath: liveSet.path, depth: 0)
+                            TrackRow(track: track, liveSetPath: liveSet.path, projectPath: liveSet.projectPath, depth: 0)
                         }
                     }
                     .padding()

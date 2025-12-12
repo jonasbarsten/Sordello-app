@@ -9,6 +9,21 @@ import SwiftUI
 import AppKit
 import GRDB
 
+/// Parsing progress for a project
+struct ParsingProgress: Sendable {
+    var total: Int
+    var completed: Int
+
+    var fraction: Double {
+        guard total > 0 else { return 0 }
+        return Double(completed) / Double(total)
+    }
+
+    var isComplete: Bool {
+        total > 0 && completed >= total
+    }
+}
+
 /// Manages project opening and file access
 /// Uses per-project GRDB databases for persistence
 @Observable
@@ -24,6 +39,9 @@ final class ProjectManager {
     /// List of currently open project paths (for UI)
     private(set) var openProjectPaths: [String] = []
 
+    /// Parsing progress per project (for UI progress bars)
+    var parsingProgress: [String: ParsingProgress] = [:]
+
     /// Get the database for a project
     func database(forProjectPath path: String) -> ProjectDatabase? {
         return projectDatabases[path]
@@ -34,11 +52,26 @@ final class ProjectManager {
         return versionControls[path]
     }
 
-    /// Get the current project's database (convenience for UI state)
-    var currentDatabase: ProjectDatabase? {
-        guard let path = UIState.shared.selectedProjectPath else { return nil }
-        return projectDatabases[path]
+    /// Start tracking parsing progress for a project
+    @MainActor
+    func startParsingProgress(for projectPath: String, total: Int) {
+        parsingProgress[projectPath] = ParsingProgress(total: total, completed: 0)
     }
+
+    /// Update parsing progress for a project
+    @MainActor
+    func updateParsingProgress(for projectPath: String, completed: Int) {
+        guard var progress = parsingProgress[projectPath] else { return }
+        progress.completed = completed
+        parsingProgress[projectPath] = progress
+    }
+
+    /// Clear parsing progress for a project (when done)
+    @MainActor
+    func clearParsingProgress(for projectPath: String) {
+        parsingProgress.removeValue(forKey: projectPath)
+    }
+
 
     /// Get all open projects with their data
     func getOpenProjects() -> [Project] {
@@ -135,13 +168,7 @@ final class ProjectManager {
                 openProjectPaths.append(project.path)
             }
 
-            // Select the project in UI state
-            UIState.shared.selectedProjectPath = project.path
-
-            // Auto-select the first main LiveSet
-            if let firstMain = try projectDb.fetchMainLiveSets().first {
-                UIState.shared.selectedLiveSetPath = firstMain.path
-            }
+            // Note: UI state selection is handled by the views observing openProjectPaths changes
         } catch {
             print("Failed to load project: \(error)")
         }
@@ -168,7 +195,7 @@ final class ProjectManager {
         }
 
         print("Starting parallel parsing of \(liveSetPaths.count) LiveSets...")
-        AlsHandler.parseAllInBackground(paths: liveSetPaths, bookmarkData: bookmarkData, db: projectDb)
+        AlsHandler.parseAllInBackground(paths: liveSetPaths, bookmarkData: bookmarkData, db: projectDb, projectPath: projectPath)
     }
 
     /// Internal parsing method using AlsHandler
@@ -200,21 +227,21 @@ final class ProjectManager {
             // Find subprojects for this LiveSet
             let subprojects = try projectDb.fetchSubprojectLiveSets()
 
-            // Build map of source group ID -> subproject path
-            var subprojectsByGroupId: [Int: String] = [:]
+            // Build map of source track ID -> subproject path
+            var subprojectsByTrackId: [Int: String] = [:]
             for subproject in subprojects {
-                if let sourceGroupId = subproject.sourceGroupId,
+                if let sourceTrackId = subproject.sourceTrackId,
                    subproject.sourceLiveSetName == liveSet.name {
-                    subprojectsByGroupId[sourceGroupId] = subproject.path
+                    subprojectsByTrackId[sourceTrackId] = subproject.path
                 }
             }
 
-            guard !subprojectsByGroupId.isEmpty else { return }
+            guard !subprojectsByTrackId.isEmpty else { return }
 
             // Update tracks
             let tracks = try projectDb.fetchTracks(forLiveSetPath: liveSet.path)
             for var track in tracks where track.isGroup {
-                if let subprojectPath = subprojectsByGroupId[track.trackId] {
+                if let subprojectPath = subprojectsByTrackId[track.trackId] {
                     track.subprojectPath = subprojectPath
                     try projectDb.updateTrack(track)
                     print("Linked group '\(track.name)' (ID: \(track.trackId)) to subproject")
@@ -272,43 +299,6 @@ final class ProjectManager {
         }
     }
 
-    /// Extract a group as a subproject (uses bookmark for folder access)
-    func extractSubproject(from liveSetPath: String, groupId: Int, groupName: String, sourceLiveSetName: String, to outputPath: String, projectPath: String, completion: @escaping (String?) -> Void) {
-//        Task.detached { [weak self] in
-//            guard let self = self else { return }
-//            await MainActor.run { [self] in
-//                self.accessFile(at: projectPath) { folderUrl in
-//                    let extractor = AlsExtractor()
-//                    let result = extractor.extractGroup(from: liveSetPath, groupId: groupId, to: outputPath)
-//
-//                    if result.success, let outputPath = result.outputPath {
-//                        // Save metadata JSON file
-//                        let baseName = URL(fileURLWithPath: outputPath).deletingPathExtension().lastPathComponent
-//                        let metadataFileName = "\(baseName)-meta.json"
-//                        let metadataUrl = folderUrl.appendingPathComponent(metadataFileName)
-//
-//                        let metadata: [String: Any] = [
-//                            "sourceLiveSetName": sourceLiveSetName,
-//                            "sourceGroupId": groupId,
-//                            "sourceGroupName": groupName,
-//                            "extractedAt": ISO8601DateFormatter().string(from: Date())
-//                        ]
-//
-//                        if let jsonData = try? JSONSerialization.data(withJSONObject: metadata, options: .prettyPrinted) {
-//                            try? jsonData.write(to: metadataUrl)
-//                            print("Saved metadata: \(metadataFileName)")
-//                        }
-//
-//                        completion(outputPath)
-//                    } else {
-//                        print("Extraction failed: \(result.error ?? "unknown error")")
-//                        completion(nil)
-//                    }
-//                }
-//            }
-//        }
-    }
-
     /// Rescan a project folder to update the live sets list
     func rescanProject(projectPath: String) {
         BookmarkManager.shared.accessFile(at: projectPath) { folderUrl in
@@ -352,23 +342,23 @@ final class ProjectManager {
     }
 
     /// Create a version of a track (extracts it to a new .als file)
-    func createLiveSetTrackVersion(liveSetPath: String, trackId: Int, trackName: String) {
-        // Get project path from the LiveSet
-        guard let projectPath = UIState.shared.selectedProjectPath,
-              let vc = versionControls[projectPath],
-              let projectDb = projectDatabases[projectPath] else { return }
+    func createLiveSetTrackVersion(liveSetPath: String, trackId: Int, trackName: String, projectPath: String) {
+        // Get project path and original LiveSet
+        guard let vc = versionControls[projectPath],
+              let projectDb = projectDatabases[projectPath],
+              let originalLiveSet = try? projectDb.fetchLiveSet(path: liveSetPath) else { return }
 
         // Generate output path
         let outputPath = vc.liveSetTrackVersionPath(for: liveSetPath, trackId: trackId)
-        let liveSetName = URL(fileURLWithPath: liveSetPath).deletingPathExtension().lastPathComponent
 
-        // Insert a placeholder immediately so it appears in UI
-        var placeholder = LiveSet(path: outputPath, category: .liveSetTrackVersion)
-        placeholder.projectPath = projectPath
+        // Insert a placeholder as copy of original (inherits fileModificationDate for change detection)
+        var placeholder = originalLiveSet
+        placeholder.path = outputPath
+        placeholder.category = .liveSetTrackVersion
         placeholder.parentLiveSetPath = liveSetPath
-        placeholder.sourceLiveSetName = liveSetName
-        placeholder.sourceGroupId = trackId
-        placeholder.sourceGroupName = trackName
+        placeholder.sourceLiveSetName = originalLiveSet.name
+        placeholder.sourceTrackId = trackId
+        placeholder.sourceTrackName = trackName
         placeholder.extractedAt = Date()
         placeholder.isParsed = false
         try? projectDb.insertLiveSet(placeholder)

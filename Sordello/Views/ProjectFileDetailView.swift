@@ -5,25 +5,27 @@
 
 import SwiftUI
 
-struct LiveSetDetailView: View {
+struct ProjectFileDetailView: View {
+    @Environment(AppState.self) private var appState
     let liveSet: LiveSet
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Header
-            LiveSetHeader(liveSet: liveSet)
-
+            ProjectFileHeader(liveSet: liveSet)
+            
             Divider()
-
+            
             // Content
             TrackListView(liveSet: liveSet)
         }
         .onChange(of: liveSet.path) { _, _ in
-            UIState.shared.selectedTrack = nil
-        }
+            appState.selectedTrack = nil
+            }
     }
 }
 
 #Preview {
-    LiveSetDetailView(liveSet: LiveSet(path: "/test/My Song.als", category: .main))
+    ProjectFileDetailView(liveSet: LiveSet(path: "/test/My Song.als", category: .main))
+        .environment(AppState())
 }

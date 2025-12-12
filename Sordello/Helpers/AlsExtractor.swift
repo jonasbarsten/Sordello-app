@@ -8,7 +8,7 @@
 import Foundation
 import Compression
 
-/// Extracts a group track and its children to a new .als file
+/// Extracts tracks from .als files to new standalone .als files
 /// Pure struct - no mutable state, safe to use on any thread
 struct AlsExtractor {
 
@@ -17,161 +17,6 @@ struct AlsExtractor {
         let outputPath: String?
         let tracksExtracted: Int
         let error: String?
-    }
-
-    /// Extract a group from an .als file to a new subproject file
-    func extractGroup(from inputPath: String, groupId: Int, to outputPath: String) -> ExtractionResult {
-        // Read and decompress the input file
-        let inputUrl = URL(fileURLWithPath: inputPath)
-        guard let compressedData = try? Data(contentsOf: inputUrl) else {
-            return ExtractionResult(success: false, outputPath: nil, tracksExtracted: 0, error: "Failed to read input file")
-        }
-
-        guard let xmlData = compressedData.gunzip() else {
-            return ExtractionResult(success: false, outputPath: nil, tracksExtracted: 0, error: "Failed to decompress file")
-        }
-
-        guard let xmlString = String(data: xmlData, encoding: .utf8) else {
-            return ExtractionResult(success: false, outputPath: nil, tracksExtracted: 0, error: "Failed to decode XML as UTF-8")
-        }
-
-        // Parse the XML
-        let xmlDoc: XMLDocument
-        do {
-            xmlDoc = try XMLDocument(xmlString: xmlString, options: [.nodePreserveAll])
-        } catch {
-            return ExtractionResult(success: false, outputPath: nil, tracksExtracted: 0, error: "Failed to parse XML: \(error.localizedDescription)")
-        }
-
-        // Find the structure
-        guard let root = xmlDoc.rootElement(),
-              root.name == "Ableton",
-              let liveSet = root.elements(forName: "LiveSet").first,
-              let tracksElement = liveSet.elements(forName: "Tracks").first else {
-            return ExtractionResult(success: false, outputPath: nil, tracksExtracted: 0, error: "Invalid .als structure")
-        }
-
-        let trackTypes = ["MidiTrack", "AudioTrack", "GroupTrack", "ReturnTrack"]
-
-        // Get all track elements
-        var allTrackElements: [XMLElement] = []
-        for child in tracksElement.children ?? [] {
-            if let element = child as? XMLElement,
-               let tagName = element.name,
-               trackTypes.contains(tagName) {
-                allTrackElements.append(element)
-            }
-        }
-
-        // Find the main group track
-        var groupTrackElement: XMLElement?
-        for element in allTrackElements {
-            if element.name == "GroupTrack",
-               let idAttr = element.attribute(forName: "Id")?.stringValue,
-               Int(idAttr) == groupId {
-                groupTrackElement = element
-                break
-            }
-        }
-
-        guard let mainGroup = groupTrackElement else {
-            return ExtractionResult(success: false, outputPath: nil, tracksExtracted: 0, error: "Group track with ID \(groupId) not found")
-        }
-
-        let groupName = getTrackName(mainGroup)
-        print("Extracting group: \"\(groupName)\" (ID: \(groupId))")
-
-        // Collect all group IDs to include (main group + nested groups)
-        var groupIdsToInclude = Set<Int>([groupId])
-
-        // Keep scanning until we find no new nested groups
-        var foundNew = true
-        while foundNew {
-            foundNew = false
-            for element in allTrackElements {
-                if element.name == "GroupTrack" {
-                    let nestedId = getTrackId(element)
-                    if groupIdsToInclude.contains(nestedId) { continue }
-
-                    let parentId = getTrackGroupId(element)
-                    if groupIdsToInclude.contains(parentId) {
-                        groupIdsToInclude.insert(nestedId)
-                        foundNew = true
-                        print("  Found nested group: \"\(getTrackName(element))\" (ID: \(nestedId))")
-                    }
-                }
-            }
-        }
-
-        // Set the main group track to root level
-        setTrackGroupId(mainGroup, newGroupId: -1)
-        print("  Including: \(groupName) (GroupTrack, ID: \(groupId))")
-
-        // Collect child tracks and return tracks
-        var childTracks: [XMLElement] = []
-        var returnTracks: [XMLElement] = []
-
-        for element in allTrackElements {
-            guard let tagName = element.name else { continue }
-
-            if tagName == "ReturnTrack" {
-                returnTracks.append(element)
-                continue
-            }
-
-            // Skip the main group track (we already have it)
-            if element === mainGroup { continue }
-
-            let trackGroupId = getTrackGroupId(element)
-
-            // Include if this track belongs to any group in our hierarchy
-            if groupIdsToInclude.contains(trackGroupId) {
-                let trackId = getTrackId(element)
-                let trackName = getTrackName(element)
-                print("  Including: \(trackName) (\(tagName), ID: \(trackId))")
-                childTracks.append(element)
-            }
-        }
-
-        print("  Including \(returnTracks.count) return track(s)")
-
-        // Remove all tracks from the original Tracks element
-        while tracksElement.children?.first != nil {
-            tracksElement.removeChild(at: 0)
-        }
-
-        // Add tracks in order: main group, children, return tracks
-        tracksElement.addChild(mainGroup.copy() as! XMLNode)
-        for track in childTracks {
-            tracksElement.addChild(track.copy() as! XMLNode)
-        }
-        for track in returnTracks {
-            tracksElement.addChild(track.copy() as! XMLNode)
-        }
-
-        // Get the modified XML string
-        let newXmlString = xmlDoc.xmlString(options: [.nodePrettyPrint])
-
-        // Compress to gzip
-        guard let xmlBytes = newXmlString.data(using: .utf8),
-              let compressedOutput = xmlBytes.gzip() else {
-            return ExtractionResult(success: false, outputPath: nil, tracksExtracted: 0, error: "Failed to compress output")
-        }
-
-        // Write to output file
-        let outputUrl = URL(fileURLWithPath: outputPath)
-        do {
-            try compressedOutput.write(to: outputUrl)
-        } catch {
-            return ExtractionResult(success: false, outputPath: nil, tracksExtracted: 0, error: "Failed to write output file: \(error.localizedDescription)")
-        }
-
-        return ExtractionResult(
-            success: true,
-            outputPath: outputPath,
-            tracksExtracted: childTracks.count + 1,  // +1 for the group itself
-            error: nil
-        )
     }
 
     /// Extract any track (audio, MIDI, or group) from an .als file to a new file
@@ -370,6 +215,33 @@ struct AlsExtractor {
                 valueAttr.stringValue = String(newGroupId)
             }
         }
+
+        // If moving to root level (-1), route audio output to Master
+        if newGroupId == -1 {
+            setAudioOutputToMaster(element)
+        }
+    }
+
+    /// Set AudioOutputRouting to Master for tracks at root level
+    private func setAudioOutputToMaster(_ element: XMLElement) {
+        // Navigate to DeviceChain -> AudioOutputRouting
+        guard let deviceChain = element.elements(forName: "DeviceChain").first,
+              let audioOutputRouting = deviceChain.elements(forName: "AudioOutputRouting").first,
+              let target = audioOutputRouting.elements(forName: "Target").first else {
+            return
+        }
+
+        let oldTarget = target.attribute(forName: "Value")?.stringValue ?? "unknown"
+        target.attribute(forName: "Value")?.stringValue = "AudioOut/Master"
+
+        // Also update the display strings
+        if let upperDisplay = audioOutputRouting.elements(forName: "UpperDisplayString").first {
+            upperDisplay.attribute(forName: "Value")?.stringValue = "Master"
+        }
+        if let lowerDisplay = audioOutputRouting.elements(forName: "LowerDisplayString").first {
+            lowerDisplay.attribute(forName: "Value")?.stringValue = ""
+        }
+        print("  Fixed audio routing: \(oldTarget) → Master")
     }
 }
 

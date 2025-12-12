@@ -20,7 +20,7 @@ struct LiveSetRow: View {
 
                 // Show source info for subprojects with metadata
                 if liveSet.category == .liveSetTrackVersion, liveSet.hasMetadata {
-                    Text("From: \(liveSet.sourceLiveSetName ?? "") → \(liveSet.sourceGroupName ?? "")")
+                    Text("From: \(liveSet.sourceLiveSetName ?? "") → \(liveSet.sourceTrackName ?? "")")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                         .lineLimit(1)
@@ -35,7 +35,6 @@ struct LiveSetRow: View {
                     .controlSize(.small)
             }
         }
-        .contentShape(Rectangle())
         .contextMenu {
             Button("Open in Ableton Live") {
                 NSWorkspace.shared.open(URL(fileURLWithPath: liveSet.path))
@@ -75,8 +74,8 @@ struct LiveSetRow: View {
 #Preview("Subproject") {
     var subproject = LiveSet(path: "/test/.sordello/My Song/subprojects/Drums-2025-12-09T14-30-00.als", category: .liveSetTrackVersion)
     subproject.sourceLiveSetName = "My Song"
-    subproject.sourceGroupName = "Drums"
-    subproject.sourceGroupId = 15
+    subproject.sourceTrackName = "Drums"
+    subproject.sourceTrackId = 15
     return LiveSetRow(liveSet: subproject)
 }
 

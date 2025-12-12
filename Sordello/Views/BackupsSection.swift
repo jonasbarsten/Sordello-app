@@ -22,7 +22,7 @@ struct BackupsSection: View {
                 Section("Backups (\(backups.count))") {
                     ForEach(backups, id: \.path) { backup in
                         LiveSetRow(liveSet: backup)
-                            .tag(backup.path)
+                            .tag(backup)
                     }
                 }
             }
